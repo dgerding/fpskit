@@ -663,613 +663,656 @@ public class LevelLayout : MonoBehaviour
 
 This prevents the double component issue while maintaining clear setup requirements for students.
 
-### 4.2 Phase 2: TargetAI Component
+### 4.2 TargetAI Component
 
-#### 4.2.1 Complete TargetAI.cs
+#### 4.2.1 TargetAI.cs
 
 ```csharp
-// Location: Create new file at Assets/Creator Kit - FPS/Scripts/System/TargetAI.cs
-// Purpose: NavMesh-based AI controller for Target enemies
-// Reference: Ferrone Chapter 9, pages 273-284
+// Location: Create new file at Assets/Creator Kit - FPS/Scripts/AI/TargetAI.cs
+// Purpose: Main AI behavior controller for NavMesh-based enemies
+// References: Ferrone pg. 278-284 (AI state management and player detection)
 
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.AI;
 
 /// <summary>
-/// NavMesh-based AI controller for enemy targets.
-/// Implements patrol, chase, and flee behaviors using state machine architecture.
-///
-/// LEARNING OBJECTIVES (Ferrone Chapter 9):
-/// - NavMeshAgent setup and configuration (pg. 271-273)
-/// - Procedural programming for patrol routes (pg. 274-277)
-/// - State-based AI behavior (pg. 278-284)
-/// - Player detection and destination changes (pg. 283-284)
-///
-/// STATE MACHINE:
-/// Patrol â†’ (Player detected) â†’ Chase â†’ (Player far) â†’ Patrol
-///    â†“                            â†“
-///    â†“                            â†“
-///    â””â”€â”€â”€â”€â”€â”€â†’ (Hit) â†’ Flee â† â”€â”€â”€â”€â”€â”˜
+/// AI controller for targets using NavMesh pathfinding
+/// Implements patrol, chase, flee, and search behaviors
+/// 
+/// ARCHITECTURE:
+/// - State machine pattern for behavior management
+/// - NavMeshAgent for pathfinding
+/// - Integrates with existing Target damage system
+/// 
+/// FERRONE ALIGNMENT:
+/// - pg. 278: "Moving Enemy Agents"
+/// - pg. 283: "Seek and Destroy" player detection
+/// - pg. 291: "Refactoring and keeping it DRY"
 /// </summary>
 [RequireComponent(typeof(NavMeshAgent))]
 public class TargetAI : MonoBehaviour
 {
     // ====================================================================
-    // AI STATE ENUMERATION
+    // CONFIGURATION
     // ====================================================================
-
-    /// <summary>
-    /// Defines the current behavior state of the AI
-    /// Reference: Ferrone pg. 278-284 (state-based enemy behavior)
-    /// </summary>
-    private enum AIState
-    {
-        /// <summary>
-        /// Patrolling between waypoints on predefined route
-        /// Default state - enemy walks patrol route looking for player
-        /// </summary>
-        Patrolling,
-
-        /// <summary>
-        /// Chasing the player after detection
-        /// Enemy actively pursues player, updating destination continuously
-        /// </summary>
-        ChasingPlayer,
-
-        /// <summary>
-        /// Fleeing after taking damage but not destroyed
-        /// Enemy runs away from player, then returns to patrol
-        /// </summary>
-        Fleeing,
-
-        /// <summary>
-        /// Searching for player at last known location
-        /// Optional enhancement - enemy investigates where player was seen
-        /// </summary>
-        Searching
-    }
-
-    // ====================================================================
-    // NAVIGATION COMPONENTS
-    // ====================================================================
-
-    [Header("Navigation")]
-    [Tooltip("Reference to the NavMeshAgent component (auto-assigned)")]
-    private NavMeshAgent _agent;
-
-    [Tooltip("Movement speed in units per second")]
-    public float moveSpeed = 3.5f;
-
-    [Tooltip("How close to destination before selecting next waypoint")]
-    [Range(0.1f, 2.0f)]
-    public float destinationThreshold = 0.5f;
-
-    // ====================================================================
-    // PATROL SYSTEM
-    // ====================================================================
-    // Reference: Ferrone pg. 274-277 (procedural patrol route initialization)
-
-    [Header("Patrol Settings")]
-    [Tooltip("Parent GameObject containing patrol waypoint children")]
+    
+    [Header("AI Configuration")]
+    [Tooltip("Reference to patrol waypoint parent (Ferrone pg. 274)")]
     public Transform patrolRoute;
-
-    [Tooltip("List of patrol waypoints (auto-populated from patrolRoute children)")]
-    private List<Transform> patrolLocations = new List<Transform>();
-
-    [Tooltip("Current index in patrol route")]
-    private int _currentLocationIndex = 0;
-
-    [Tooltip("Should patrol route loop or ping-pong?")]
-    public bool loopPatrol = true;
-
-    [Tooltip("Direction through patrol route (1 = forward, -1 = backward)")]
-    private int _patrolDirection = 1;
-
-    // ====================================================================
-    // PLAYER DETECTION SYSTEM
-    // ====================================================================
-    // Reference: Ferrone pg. 283-284 (seek and destroy mechanics)
-
-    [Header("Player Interaction")]
-    [Tooltip("Detection range for spotting player")]
+    
+    [Tooltip("Detection radius for spotting player (Ferrone pg. 283)")]
     [Range(5f, 30f)]
-    public float detectionRange = 15f;
-
-    [Tooltip("Range at which enemy loses player")]
-    [Range(15f, 50f)]
-    public float losePlayerRange = 25f;
-
-    [Tooltip("How often to check for player (seconds) - optimization")]
-    [Range(0.1f, 1.0f)]
-    public float playerCheckInterval = 0.5f;
-
-    [Tooltip("Reference to player transform (auto-assigned via Controller.Instance)")]
-    private Transform _playerTransform;
-
-    private float _lastPlayerCheck = 0f;
-
-    // ====================================================================
-    // FLEE SYSTEM
-    // ====================================================================
-
-    [Header("Flee Behavior")]
-    [Tooltip("Distance to flee from player when wounded")]
+    public float detectionRadius = 15f;
+    
+    [Tooltip("Distance to flee when damaged")]
     [Range(10f, 30f)]
     public float fleeDistance = 20f;
-
-    [Tooltip("How long to flee before returning to patrol")]
-    [Range(2f, 10f)]
-    public float fleeDuration = 5f;
-
-    private float _fleeTimer = 0f;
-
+    
+    [Tooltip("How close to waypoint before moving to next")]
+    [Range(0.5f, 3f)]
+    public float waypointTolerance = 1f;
+    
+    [Tooltip("Speed when patrolling")]
+    public float patrolSpeed = 3.5f;
+    
+    [Tooltip("Speed when chasing player")]
+    public float chaseSpeed = 6f;
+    
+    [Tooltip("Speed when fleeing")]
+    public float fleeSpeed = 7f;
+    
+    [Header("Behavior Timers")]
+    [Tooltip("How often to check for player (performance)")]
+    public float playerCheckInterval = 0.5f;
+    
+    [Tooltip("How long to search after losing player")]
+    public float searchDuration = 5f;
+    
+    [Tooltip("How long to flee after being hit")]
+    public float fleeDuration = 3f;
+    
     // ====================================================================
     // STATE MANAGEMENT
     // ====================================================================
-
+    
+    public enum AIState
+    {
+        Patrol,     // Following waypoint route
+        Chase,      // Pursuing player
+        Flee,       // Running from damage source  
+        Searching   // Lost player, searching area
+    }
+    
     [Header("Debug")]
-    [Tooltip("Current AI state (readonly - for debugging)")]
-    [SerializeField] private AIState _currentState = AIState.Patrolling;
-
-    [Tooltip("Show debug visualizations in Scene view")]
-    public bool showDebugGizmos = true;
-
+    public AIState currentState = AIState.Patrol;
+    
+    // ====================================================================
+    // PRIVATE MEMBERS
+    // ====================================================================
+    
+    private NavMeshAgent _agent;
+    private List<Transform> _waypoints = new List<Transform>();
+    private int _currentWaypointIndex = 0;
+    private Transform _player;
+    private Vector3 _lastKnownPlayerPosition;
+    private float _stateTimer = 0f;
+    private float _playerCheckTimer = 0f;
+    private Vector3 _fleeDestination;
+    
     // ====================================================================
     // INITIALIZATION
     // ====================================================================
-    // Reference: Ferrone pg. 276-279 (Start method initialization)
-
-    /// <summary>
-    /// Unity lifecycle method - called on first frame before Update
-    /// Initializes NavMeshAgent, finds player, sets up patrol route
-    ///
-    /// Reference: Ferrone pg. 278 "After that, it uses GetComponent() to find
-    /// and return the attached NavMeshAgent component to the agent"
-    /// </summary>
+    
     void Start()
     {
-        // ================================================================
-        // GET NAVMESHAGENT COMPONENT
-        // ================================================================
-
-        // Get NavMeshAgent component (required by RequireComponent attribute)
+        // Get NavMeshAgent component
         _agent = GetComponent<NavMeshAgent>();
-
         if (_agent == null)
         {
-            Debug.LogError($"TargetAI on {gameObject.name} requires NavMeshAgent component!");
+            Debug.LogError($"TargetAI on {gameObject.name} requires NavMeshAgent!");
             enabled = false;
             return;
         }
-
-        // ================================================================
-        // CONFIGURE AGENT PROPERTIES
-        // ================================================================
-        // Reference: Ferrone pg. 271-273 (NavMeshAgent component properties)
-
-        // Speed: How fast agent moves (units per second)
-        _agent.speed = moveSpeed;
-
-        // Angular Speed: How fast agent rotates (degrees per second)
-        _agent.angularSpeed = 120f;
-
-        // Acceleration: How quickly agent reaches max speed
-        _agent.acceleration = 8f;
-
-        // Stopping Distance: How close to get to destination
-        _agent.stoppingDistance = destinationThreshold;
-
-        // Auto Braking: Slow down when approaching destination
-        _agent.autoBraking = true;
-
-        // ================================================================
-        // FIND PLAYER REFERENCE
-        // ================================================================
-        // Reference: Ferrone pg. 284 "Then, we use GameObject.Find("Player")
-        // to return a reference to the Player object in the scene"
-
-        // Get player transform via Controller Singleton
-        // Controller.Instance is set in Controller.Awake()
+        
+        // Cache player reference (Ferrone pg. 283 - finding the player)
         if (Controller.Instance != null)
         {
-            _playerTransform = Controller.Instance.transform;
+            _player = Controller.Instance.transform;
         }
         else
         {
-            Debug.LogWarning($"TargetAI on {gameObject.name}: Controller.Instance is null! Player detection disabled.");
+            Debug.LogWarning("TargetAI: Controller.Instance not found!");
         }
-
-        // ================================================================
-        // INITIALIZE PATROL ROUTE
-        // ================================================================
-        // Reference: Ferrone pg. 276-277 (procedural patrol route initialization)
-
+        
+        // Initialize patrol route
         InitializePatrolRoute();
-
-        // Start patrolling if we have waypoints
-        if (patrolLocations.Count > 0)
-        {
-            MoveToNextPatrolLocation();
-        }
-        else
-        {
-            Debug.LogWarning($"TargetAI on {gameObject.name}: No patrol locations found! Assign patrolRoute in Inspector.");
-        }
+        
+        // Start patrolling
+        SetState(AIState.Patrol);
+        
+        Debug.Log($"TargetAI initialized on {gameObject.name} with {_waypoints.Count} waypoints");
     }
-
-    // ====================================================================
-    // PATROL INITIALIZATION
-    // ====================================================================
-    // Reference: Ferrone pg. 276-277 (procedural programming)
-
+    
     /// <summary>
-    /// Procedurally populates patrol locations from patrolRoute children
-    ///
-    /// PROCEDURAL PROGRAMMING:
-    /// Ferrone pg. 274: "Any task that executes the same logic on one or more
-    /// sequential objects is the perfect candidate for procedural programming"
-    ///
-    /// This method iterates through child transforms and adds them to a list,
-    /// demonstrating the procedural approach Ferrone teaches.
+    /// Initialize waypoint list from patrol route
+    /// Reference: Ferrone pg. 274-277 (procedural patrol setup)
     /// </summary>
     void InitializePatrolRoute()
     {
-        // Clear existing locations (safety check)
-        patrolLocations.Clear();
-
-        // Validate patrol route is assigned
+        _waypoints.Clear();
+        
         if (patrolRoute == null)
         {
-            Debug.LogWarning($"TargetAI on {gameObject.name}: patrolRoute not assigned!");
+            Debug.LogWarning($"No patrol route assigned to {gameObject.name}");
             return;
         }
-
-        // Iterate through all children of patrol route parent
-        // Reference: Ferrone pg. 277 "Then, we use a foreach statement to loop
-        // through each child GameObject in PatrolRoute"
-        foreach (Transform child in patrolRoute)
+        
+        // Collect all child transforms as waypoints
+        foreach (Transform waypoint in patrolRoute)
         {
-            // Add each child transform to patrol locations list
-            // Reference: Ferrone pg. 277 "Finally, we add each sequential child
-            // Transform component to the list of locations using the Add() method"
-            patrolLocations.Add(child);
+            _waypoints.Add(waypoint);
         }
-
-        Debug.Log($"TargetAI on {gameObject.name}: Initialized patrol route with {patrolLocations.Count} locations");
+        
+        if (_waypoints.Count == 0)
+        {
+            Debug.LogWarning($"Patrol route for {gameObject.name} has no waypoints!");
+        }
     }
-
+    
     // ====================================================================
-    // UPDATE LOOP - STATE MACHINE
+    // UPDATE LOOP - State Machine Core
     // ====================================================================
-    // Reference: Ferrone pg. 280-282 (Update method and state management)
-
-    /// <summary>
-    /// Unity lifecycle method - called every frame
-    /// Implements state machine pattern for AI behavior
-    /// </summary>
+    
     void Update()
     {
-        // State machine: execute behavior based on current state
-        switch (_currentState)
+        // Periodic player detection check (performance optimization)
+        _playerCheckTimer += Time.deltaTime;
+        if (_playerCheckTimer >= playerCheckInterval)
         {
-            case AIState.Patrolling:
-                UpdatePatrolling();
+            _playerCheckTimer = 0f;
+            CheckForPlayer();
+        }
+        
+        // State machine update
+        switch (currentState)
+        {
+            case AIState.Patrol:
+                UpdatePatrol();
                 break;
-
-            case AIState.ChasingPlayer:
-                UpdateChasing();
+                
+            case AIState.Chase:
+                UpdateChase();
                 break;
-
-            case AIState.Fleeing:
-                UpdateFleeing();
+                
+            case AIState.Flee:
+                UpdateFlee();
                 break;
-
+                
             case AIState.Searching:
                 UpdateSearching();
                 break;
         }
-
-        // Periodic player detection check (optimization)
-        // Only check every playerCheckInterval seconds instead of every frame
-        if (Time.time - _lastPlayerCheck > playerCheckInterval)
-        {
-            CheckForPlayer();
-            _lastPlayerCheck = Time.time;
-        }
     }
-
+    
     // ====================================================================
-    // PATROL STATE
+    // STATE BEHAVIORS
     // ====================================================================
-    // Reference: Ferrone pg. 280-281 (patrol movement logic)
-
+    
     /// <summary>
-    /// Updates patrol behavior - moves between waypoints
-    ///
-    /// Reference: Ferrone pg. 280 "First, it declares the Update() method and
-    /// adds an if statement to check whether two different conditions are true:
-    /// remainingDistance and pathPending"
+    /// Patrol behavior - move between waypoints
+    /// Reference: Ferrone pg. 278-279 (moving agents)
     /// </summary>
-    void UpdatePatrolling()
+    void UpdatePatrol()
     {
-        // Check if agent has reached current destination
-        // Reference: Ferrone pg. 280 "remainingDistance returns how far the
-        // NavMeshAgent component currently is from its set destination"
-        if (!_agent.pathPending && _agent.remainingDistance < destinationThreshold)
+        if (_waypoints.Count == 0) return;
+        
+        // Check if reached current waypoint
+        if (!_agent.pathPending && _agent.remainingDistance < waypointTolerance)
         {
-            // Reached waypoint - move to next one
             MoveToNextPatrolLocation();
         }
     }
-
+    
     /// <summary>
-    /// Moves agent to next patrol location in sequence
-    ///
-    /// Reference: Ferrone pg. 279-281 (MoveToNextPatrolLocation implementation)
+    /// Chase behavior - pursue the player
+    /// Reference: Ferrone pg. 283-284 (seek and destroy)
     /// </summary>
-    void MoveToNextPatrolLocation()
+    void UpdateChase()
     {
-        // Defensive programming: ensure locations list isn't empty
-        // Reference: Ferrone pg. 281 "Here, we added an if statement to make
-        // sure that Locations isn't empty before the rest of the code"
-        if (patrolLocations.Count == 0)
-            return;
-
-        // Set NavMeshAgent destination to current patrol location
-        // Reference: Ferrone pg. 279 "Finally, it declares MoveToNextPatrolLocation()
-        // as a private method and sets _agent.destination"
-        _agent.SetDestination(patrolLocations[_currentLocationIndex].position);
-
-        // Increment index with wraparound using modulo operator
-        // Reference: Ferrone pg. 281 "Then, we set _locationIndex to its current
-        // value, +1, followed by the modulo (%) of Locations.Count"
-
-        if (loopPatrol)
+        if (_player == null) return;
+        
+        // Update destination to player position
+        _agent.SetDestination(_player.position);
+        _lastKnownPlayerPosition = _player.position;
+        
+        // If player escapes detection range, switch to searching
+        float distanceToPlayer = Vector3.Distance(transform.position, _player.position);
+        if (distanceToPlayer > detectionRadius * 1.5f) // Give some buffer
         {
-            // Loop mode: 0 â†’ 1 â†’ 2 â†’ 3 â†’ 0 â†’ 1 â†’ ...
-            _currentLocationIndex = (_currentLocationIndex + 1) % patrolLocations.Count;
-        }
-        else
-        {
-            // Ping-pong mode: 0 â†’ 1 â†’ 2 â†’ 3 â†’ 2 â†’ 1 â†’ 0 â†’ 1 â†’ ...
-            _currentLocationIndex += _patrolDirection;
-
-            // Reverse direction at endpoints
-            if (_currentLocationIndex >= patrolLocations.Count)
-            {
-                _currentLocationIndex = patrolLocations.Count - 2;
-                _patrolDirection = -1;
-            }
-            else if (_currentLocationIndex < 0)
-            {
-                _currentLocationIndex = 1;
-                _patrolDirection = 1;
-            }
+            SetState(AIState.Searching);
         }
     }
-
-    // ====================================================================
-    // PLAYER DETECTION
-    // ====================================================================
-    // Reference: Ferrone pg. 283-284 (seek and destroy mechanics)
-
+    
     /// <summary>
-    /// Checks for player proximity and transitions states accordingly
-    ///
-    /// Reference: Ferrone pg. 284 "Finally, we set _agent.destination to the
-    /// player's Vector3 position in OnTriggerEnter() whenever the player enters
-    /// the enemies' attack zone"
-    ///
-    /// NOTE: We use distance check instead of trigger collider for simplicity
+    /// Flee behavior - run away from danger
+    /// Custom implementation for Creator Kit
     /// </summary>
-    void CheckForPlayer()
+    void UpdateFlee()
     {
-        if (_playerTransform == null)
-            return;
-
-        // Calculate distance to player
-        // Reference: Unity-3d-Math-Explained.md "Vector3.Distance() calculates
-        // straight-line distance between two points for game logic"
-        float distanceToPlayer = Vector3.Distance(transform.position, _playerTransform.position);
-
-        // STATE TRANSITION: Patrol â†’ Chase
-        if (distanceToPlayer <= detectionRange && _currentState == AIState.Patrolling)
+        _stateTimer += Time.deltaTime;
+        
+        // Return to patrol after flee duration
+        if (_stateTimer >= fleeDuration)
         {
-            _currentState = AIState.ChasingPlayer;
-            Debug.Log($"{gameObject.name} detected player - switching to chase mode");
-        }
-        // STATE TRANSITION: Chase â†’ Patrol (player escaped)
-        else if (distanceToPlayer > losePlayerRange && _currentState == AIState.ChasingPlayer)
-        {
-            _currentState = AIState.Patrolling;
-            MoveToNextPatrolLocation();
-            Debug.Log($"{gameObject.name} lost player - resuming patrol");
+            Debug.Log($"{gameObject.name} finished fleeing, returning to patrol");
+            SetState(AIState.Patrol);
         }
     }
-
-    // ====================================================================
-    // CHASE STATE
-    // ====================================================================
-    // Reference: Ferrone pg. 283-284 (changing agent destination)
-
+    
     /// <summary>
-    /// Updates chase behavior - pursues player continuously
-    ///
-    /// Reference: Ferrone pg. 284 "If you play the game now and get too close
-    /// to the patrolling enemy, you'll see that it breaks from its path and
-    /// comes straight for you"
-    /// </summary>
-    void UpdateChasing()
-    {
-        if (_playerTransform == null)
-        {
-            // Player reference lost - return to patrol
-            _currentState = AIState.Patrolling;
-            MoveToNextPatrolLocation();
-            return;
-        }
-
-        // Continuously update destination to player's current position
-        // This creates smooth pursuit even as player moves
-        _agent.SetDestination(_playerTransform.position);
-    }
-
-    // ====================================================================
-    // FLEE STATE
-    // ====================================================================
-
-    /// <summary>
-    /// Called by Target.Got() when enemy is wounded but not destroyed
-    /// Triggers flee behavior - enemy runs away from player
-    ///
-    /// INTEGRATION POINT: This method is called from Target.cs:
-    /// if (m_CurrentHealth > 0)
-    /// {
-    ///     GetComponent<TargetAI>()?.StartFleeing();
-    ///     return;
-    /// }
-    /// </summary>
-    public void StartFleeing()
-    {
-        // Transition to flee state
-        _currentState = AIState.Fleeing;
-        _fleeTimer = fleeDuration;
-
-        Debug.Log($"{gameObject.name} is fleeing after taking damage!");
-
-        // Calculate flee position (away from player)
-        if (_playerTransform != null)
-        {
-            // Calculate direction away from player
-            // Vector3 subtraction: (A - B) gives direction from B to A
-            Vector3 directionAwayFromPlayer = (transform.position - _playerTransform.position).normalized;
-
-            // Calculate target flee position
-            Vector3 fleePosition = transform.position + directionAwayFromPlayer * fleeDistance;
-
-            // Find valid NavMesh position near calculated point
-            // SamplePosition ensures we flee to a walkable location
-            NavMeshHit hit;
-            if (NavMesh.SamplePosition(fleePosition, out hit, fleeDistance, NavMesh.AllAreas))
-            {
-                // Valid position found - flee there
-                _agent.SetDestination(hit.position);
-            }
-            else
-            {
-                // No valid position - flee to nearest patrol waypoint
-                Debug.LogWarning($"{gameObject.name}: Could not find valid flee position, moving to nearest waypoint");
-                if (patrolLocations.Count > 0)
-                {
-                    // Find closest patrol waypoint
-                    Transform closestWaypoint = patrolLocations[0];
-                    float closestDistance = Vector3.Distance(transform.position, closestWaypoint.position);
-
-                    foreach (Transform waypoint in patrolLocations)
-                    {
-                        float distance = Vector3.Distance(transform.position, waypoint.position);
-                        if (distance < closestDistance)
-                        {
-                            closestDistance = distance;
-                            closestWaypoint = waypoint;
-                        }
-                    }
-
-                    _agent.SetDestination(closestWaypoint.position);
-                }
-            }
-        }
-    }
-
-    /// <summary>
-    /// Updates flee behavior - runs away for duration then returns to patrol
-    /// </summary>
-    void UpdateFleeing()
-    {
-        // Decrement flee timer
-        _fleeTimer -= Time.deltaTime;
-
-        // STATE TRANSITION: Flee â†’ Patrol
-        if (_fleeTimer <= 0 || (!_agent.pathPending && _agent.remainingDistance < destinationThreshold))
-        {
-            // Flee complete - return to patrol
-            _currentState = AIState.Patrolling;
-            MoveToNextPatrolLocation();
-            Debug.Log($"{gameObject.name} finished fleeing - resuming patrol");
-        }
-    }
-
-    // ====================================================================
-    // SEARCHING STATE (OPTIONAL ENHANCEMENT)
-    // ====================================================================
-
-    /// <summary>
-    /// Updates searching behavior - investigates last known player location
-    /// Currently just returns to patrol - can be enhanced by students
+    /// Search behavior - look for lost player
     /// </summary>
     void UpdateSearching()
     {
-        // Future enhancement: search last known player location
-        // For now, just return to patrol
-        _currentState = AIState.Patrolling;
-        MoveToNextPatrolLocation();
+        _stateTimer += Time.deltaTime;
+        
+        // Search timeout - return to patrol
+        if (_stateTimer >= searchDuration)
+        {
+            Debug.Log($"{gameObject.name} gave up searching, returning to patrol");
+            SetState(AIState.Patrol);
+        }
+        
+        // Move to last known position if not there yet
+        if (!_agent.pathPending && _agent.remainingDistance < waypointTolerance)
+        {
+            // Could add random search pattern here
+            SetState(AIState.Patrol);
+        }
     }
-
+    
+    // ====================================================================
+    // STATE TRANSITIONS
+    // ====================================================================
+    
+    /// <summary>
+    /// Change AI state and configure agent accordingly
+    /// </summary>
+    void SetState(AIState newState)
+    {
+        // Exit current state
+        OnStateExit(currentState);
+        
+        // Enter new state
+        currentState = newState;
+        OnStateEnter(newState);
+        
+        Debug.Log($"{gameObject.name} changed state to: {newState}");
+    }
+    
+    /// <summary>
+    /// Configure agent when entering a state
+    /// </summary>
+    void OnStateEnter(AIState state)
+    {
+        _stateTimer = 0f;
+        
+        switch (state)
+        {
+            case AIState.Patrol:
+                _agent.speed = patrolSpeed;
+                _agent.isStopped = false;
+                if (_waypoints.Count > 0)
+                {
+                    MoveToNextPatrolLocation();
+                }
+                break;
+                
+            case AIState.Chase:
+                _agent.speed = chaseSpeed;
+                _agent.isStopped = false;
+                if (_player != null)
+                {
+                    _agent.SetDestination(_player.position);
+                }
+                break;
+                
+            case AIState.Flee:
+                _agent.speed = fleeSpeed;
+                _agent.isStopped = false;
+                _agent.SetDestination(_fleeDestination);
+                break;
+                
+            case AIState.Searching:
+                _agent.speed = patrolSpeed;
+                _agent.isStopped = false;
+                _agent.SetDestination(_lastKnownPlayerPosition);
+                break;
+        }
+    }
+    
+    /// <summary>
+    /// Cleanup when exiting a state
+    /// </summary>
+    void OnStateExit(AIState state)
+    {
+        // Could add state-specific cleanup here
+    }
+    
+    // ====================================================================
+    // PATROL HELPERS
+    // ====================================================================
+    
+    /// <summary>
+    /// Move to next waypoint in patrol route
+    /// Reference: Ferrone pg. 278 (waypoint navigation)
+    /// </summary>
+    void MoveToNextPatrolLocation()
+    {
+        if (_waypoints.Count == 0) return;
+        
+        // Set destination to current waypoint
+        _agent.SetDestination(_waypoints[_currentWaypointIndex].position);
+        
+        // Move to next waypoint (with wrapping)
+        _currentWaypointIndex = (_currentWaypointIndex + 1) % _waypoints.Count;
+    }
+    
+    // ====================================================================
+    // PLAYER DETECTION
+    // ====================================================================
+    
+    /// <summary>
+    /// Check if player is within detection range
+    /// Reference: Ferrone pg. 283 (player detection)
+    /// </summary>
+    void CheckForPlayer()
+    {
+        // Skip if already chasing or fleeing
+        if (currentState == AIState.Chase || currentState == AIState.Flee)
+            return;
+            
+        if (_player == null) return;
+        
+        float distanceToPlayer = Vector3.Distance(transform.position, _player.position);
+        
+        if (distanceToPlayer <= detectionRadius)
+        {
+            // Optional: Add line-of-sight check here
+            Debug.Log($"{gameObject.name} detected player at {distanceToPlayer:F1}m");
+            SetState(AIState.Chase);
+        }
+    }
+    
+    // ====================================================================
+    // PUBLIC INTERFACE
+    // ====================================================================
+    
+    /// <summary>
+    /// Called by Target.cs when damaged but not destroyed
+    /// Triggers flee behavior
+    /// </summary>
+    public void StartFleeing()
+    {
+        if (currentState == AIState.Flee) return; // Already fleeing
+        
+        // Calculate flee direction (away from player or damage source)
+        Vector3 fleeDirection = transform.position - _player.position;
+        fleeDirection.y = 0; // Keep on horizontal plane
+        fleeDirection.Normalize();
+        
+        // Calculate flee destination
+        _fleeDestination = transform.position + (fleeDirection * fleeDistance);
+        
+        // Sample to nearest point on NavMesh
+        NavMeshHit hit;
+        if (NavMesh.SamplePosition(_fleeDestination, out hit, fleeDistance, NavMesh.AllAreas))
+        {
+            _fleeDestination = hit.position;
+        }
+        
+        Debug.Log($"{gameObject.name} fleeing to {_fleeDestination}");
+        SetState(AIState.Flee);
+    }
+    
+    /// <summary>
+    /// Force the AI to stop all movement
+    /// </summary>
+    public void StopMovement()
+    {
+        if (_agent != null)
+        {
+            _agent.isStopped = true;
+        }
+    }
+    
     // ====================================================================
     // DEBUG VISUALIZATION
     // ====================================================================
-
-    /// <summary>
-    /// Draws debug gizmos in Scene view for AI visualization
-    /// Shows detection range, patrol route, and current state
-    /// </summary>
+    
     void OnDrawGizmosSelected()
     {
-        if (!showDebugGizmos)
-            return;
-
-        // Draw detection range sphere
+        // Draw detection radius
         Gizmos.color = Color.yellow;
-        Gizmos.DrawWireSphere(transform.position, detectionRange);
-
-        // Draw lose player range sphere
-        Gizmos.color = new Color(1f, 0.5f, 0f, 0.3f);
-        Gizmos.DrawWireSphere(transform.position, losePlayerRange);
-
-        // Draw patrol route
-        if (patrolLocations != null && patrolLocations.Count > 1)
+        Gizmos.DrawWireSphere(transform.position, detectionRadius);
+        
+        // Draw flee radius
+        Gizmos.color = Color.red;
+        Gizmos.DrawWireSphere(transform.position, fleeDistance);
+        
+        // Draw waypoint connections
+        if (_waypoints != null && _waypoints.Count > 1)
         {
             Gizmos.color = Color.cyan;
-            for (int i = 0; i < patrolLocations.Count; i++)
+            for (int i = 0; i < _waypoints.Count; i++)
             {
-                if (patrolLocations[i] == null)
-                    continue;
-
+                if (_waypoints[i] == null) continue;
+                
                 // Draw sphere at waypoint
-                Gizmos.DrawWireSphere(patrolLocations[i].position, 0.5f);
-
+                Gizmos.DrawSphere(_waypoints[i].position, 0.5f);
+                
                 // Draw line to next waypoint
-                int nextIndex = (i + 1) % patrolLocations.Count;
-                if (patrolLocations[nextIndex] != null)
+                int nextIndex = (i + 1) % _waypoints.Count;
+                if (_waypoints[nextIndex] != null)
                 {
-                    Gizmos.DrawLine(patrolLocations[i].position, patrolLocations[nextIndex].position);
+                    Gizmos.DrawLine(_waypoints[i].position, _waypoints[nextIndex].position);
                 }
             }
         }
-
+        
         // Draw current destination
-        if (_agent != null && _agent.hasPath)
+        if (Application.isPlaying && _agent != null && _agent.hasPath)
         {
             Gizmos.color = Color.green;
             Gizmos.DrawLine(transform.position, _agent.destination);
-            Gizmos.DrawWireSphere(_agent.destination, 0.3f);
+            Gizmos.DrawWireCube(_agent.destination, Vector3.one * 0.5f);
         }
     }
 }
 ```
 
----
+#### 4.2.2 Modified Target.cs
+
+```csharp
+// Location: Modify existing file at Assets/Creator Kit - FPS/Scripts/System/Target.cs
+// Purpose: Add AI fleeing trigger when damaged but not destroyed
+// Changes: Add TargetAI integration in Got() method
+
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+// FIXED: Removed System.Numerics import - not needed in Unity runtime scripts
+// FIXED: Removed Vector3 alias - use UnityEngine.Vector3 directly
+
+/// <summary>
+/// Target component for shootable objects in FPS Kit
+/// Modified to trigger AI fleeing behavior when damaged
+/// 
+/// INTEGRATION POINT:
+/// When health > 0 after damage, triggers TargetAI.StartFleeing()
+/// This creates the "wounded enemy runs away" behavior
+/// </summary>
+public class Target : MonoBehaviour
+{
+    // EXISTING TARGET FIELDS...
+    public float health = 1;
+    public int pointValue = 10;
+    public ParticleSystem DestroyedEffect;
+    
+    [Header("Audio")]
+    public RandomPlayer HitPlayer;
+    public AudioSource IdleSource;
+    
+    public bool Destroyed => m_Destroyed;
+    
+    bool m_Destroyed = false;
+    float m_CurrentHealth;
+    
+    // ====================================================================
+    // NEW: AI INTEGRATION
+    // ====================================================================
+    
+    /// <summary>
+    /// Cached reference to AI component (if this target has AI)
+    /// </summary>
+    private TargetAI targetAI;
+    
+    // ====================================================================
+    // EXISTING METHODS WITH MODIFICATIONS
+    // ====================================================================
+    
+    void Awake()
+    {
+        Helpers.RecursiveLayerChange(transform, LayerMask.NameToLayer("Target"));
+        
+        // NEW: Cache TargetAI reference if it exists
+        // Note: Using GetComponentInParent to handle nested prefab structures
+        targetAI = GetComponentInParent<TargetAI>();
+        if (targetAI != null)
+        {
+            Debug.Log($"Target {gameObject.name} has AI component");
+        }
+    }
+    
+    void Start()
+    {
+        PoolSystem.Create();
+        
+        if (HitPlayer != null)
+        {
+            HitPlayer.source.pitch = 1.0f + Random.Range(-0.2f, 0.2f);
+        }
+        
+        if (IdleSource != null)
+        {
+            IdleSource.pitch = 1.0f + Random.Range(-0.2f, 0.2f);
+        }
+        
+        m_CurrentHealth = health;
+        
+        if (HitPlayer != null)
+        {
+            m_CurrentHealth += HitPlayer.Clips.Length - 1;
+        }
+    }
+    
+    /// <summary>
+    /// Called when target takes damage
+    /// Modified to trigger fleeing if health > 0
+    /// 
+    /// STUDENT NOTE:
+    /// This is where damage leads to behavior change
+    /// If destroyed: remove from game
+    /// If wounded: trigger flee behavior
+    /// </summary>
+    public void Got(float damage = 1.0f)
+    {
+        m_CurrentHealth -= damage;
+        
+        if (HitPlayer != null)
+        {
+            HitPlayer.PlayRandom();
+        }
+        
+        // ================================================================
+        // NEW: FLEEING BEHAVIOR TRIGGER
+        // ================================================================
+        // If target survives the hit, make it flee
+        if (m_CurrentHealth > 0)
+        {
+            // Target is wounded but not destroyed
+            Debug.Log($"{gameObject.name} wounded! Health: {m_CurrentHealth}/{health}");
+            
+            // Trigger flee behavior if this target has AI
+            if (targetAI != null)
+            {
+                targetAI.StartFleeing();
+                Debug.Log($"{gameObject.name} is fleeing!");
+            }
+            
+            // Could add visual feedback here (damage particles, color change, etc.)
+            
+            return; // Don't destroy the target
+        }
+        
+        // ================================================================
+        // EXISTING DESTRUCTION CODE (health <= 0)
+        // ================================================================
+        
+        if (IdleSource != null && IdleSource.isPlaying)
+        {
+            IdleSource.Stop();
+        }
+        
+        var position = transform.position;
+        
+        if (HitPlayer != null)
+        {
+            var source = WorldAudioPool.GetWorldSFXSource();
+            source.transform.position = position;
+            source.pitch = HitPlayer.source.pitch;
+            source.PlayOneShot(HitPlayer.GetRandomClip());
+        }
+        
+        if (DestroyedEffect != null)
+        {
+            var effect = PoolSystem.Instance.GetInstance<ParticleSystem>(DestroyedEffect);
+            effect.time = 0.0f;
+            effect.Play();
+            effect.transform.position = position;
+        }
+        
+        m_Destroyed = true;
+        
+        // Stop AI movement before destroying
+        if (targetAI != null)
+        {
+            targetAI.StopMovement();
+        }
+        
+        gameObject.SetActive(false);
+        GameSystem.Instance.TargetDestroyed(pointValue);
+    }
+}
+
+// ============================================================================
+// END OF MODIFIED TARGET.CS
+// ============================================================================
+// 
+// SUMMARY OF CHANGES:
+// 1. FIXED: Removed System.Numerics using statement (not needed)
+// 2. FIXED: Removed Vector3 alias (use UnityEngine.Vector3 directly)
+// 3. Added TargetAI caching in Awake() (uses GetComponentInParent for flexibility)
+// 4. Added fleeing trigger in Got() when health > 0
+// 5. Added AI movement stop before destruction
+// 
+// INTEGRATION NOTES:
+// - Works with both AI and non-AI targets (null-safe)
+// - Uses GetComponentInParent to handle various prefab structures
+// - Maintains all existing Target functionality
+// ============================================================================
 
 ### 4.3 Phase 3: Waypoint System
 

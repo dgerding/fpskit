@@ -1639,329 +1639,445 @@ public class LevelRoom : MonoBehaviour
 
 ---
 
-### 4.4 Phase 4: Spawner Integration
+### 4.4 Spawner Integration
 
 #### 4.4.1 Modified TargetSpawner.cs
 
 ```csharp
 // Location: Modify existing file at Assets/Creator Kit - FPS/Scripts/System/TargetSpawner.cs
-// Purpose: Refactor to spawn NavMesh-based AI targets instead of path-following targets
-// Changes: Replace PathSystem with patrol route assignment
+// Purpose: Refactor spawner to work with NavMesh-based AI targets
+// Major Changes: Remove PathSystem dependency, add NavMesh spawning, fix instantiation timing
 
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
-#if UNITY_EDITOR
-using UnityEditor;
-#endif
 
 /// <summary>
-/// Spawns NavMesh-based AI targets with assigned patrol routes
-/// Replaces path-following system with NavMesh navigation
-///
-/// REFACTORING NOTES:
-/// - Removed PathSystem dependency
-/// - Removed Rigidbody movement
-/// - Added patrol route assignment
-/// - Maintained spawn timing system
+/// Spawns targets with NavMesh AI instead of path-following movement
+/// 
+/// ARCHITECTURE CHANGES:
+/// - Removed PathSystem dependency (was rigid path following)
+/// - Added patrol route assignment for AI waypoints
+/// - FIXED: Targets now instantiated at spawn time (not pre-instantiated)
+/// 
+/// STUDENT LEARNING:
+/// - Object pooling vs just-in-time instantiation
+/// - Component communication (Spawner → TargetAI)
+/// - Performance considerations
 /// </summary>
 public class TargetSpawner : MonoBehaviour
 {
     // ====================================================================
-    // SPAWN EVENT DEFINITION
+    // SPAWN CONFIGURATION
     // ====================================================================
-
-    /// <summary>
-    /// Defines what to spawn, how many, and timing
-    /// Modified to support NavMesh-based targets with patrol routes
-    /// </summary>
+    
     [System.Serializable]
     public class SpawnEvent
     {
-        [Tooltip("Target prefab to spawn (must have TargetAI component)")]
+        [Tooltip("Target prefab with TargetAI component")]
         public GameObject targetToSpawn;
-
-        [Tooltip("Number of targets to spawn")]
+        
+        [Tooltip("Number of this target type to spawn")]
         public int count = 1;
-
-        [Tooltip("Time delay between spawning each target")]
-        public float timeBetweenSpawn = 2.0f;
-
-        [Tooltip("Patrol route for spawned targets (Transform with waypoint children)")]
+        
+        [Tooltip("Delay between spawning each target")]
+        public float timeBetweenSpawn = 1.0f;
+        
+        [Tooltip("Patrol route for spawned AI (optional)")]
         public Transform patrolRoute;
+        
+        // Could add more per-spawn settings:
+        // public float aiDetectionRange = 15f;
+        // public float aiMoveSpeed = 3.5f;
     }
-
+    
+    [Header("Spawn Configuration")]
+    [Tooltip("List of spawn waves/events")]
+    public SpawnEvent[] spawnEvents = new SpawnEvent[0];
+    
+    [Header("Spawn Position")]
+    [Tooltip("Randomize spawn position within radius")]
+    public float spawnRadius = 2f;
+    
+    [Tooltip("Check for clear spawn location")]
+    public bool ensureClearSpawn = true;
+    
     // ====================================================================
-    // PUBLIC FIELDS
+    // SPAWN QUEUE SYSTEM - FIXED VERSION
     // ====================================================================
-
-    [Tooltip("Array of spawn events defining what and when to spawn")]
-    public SpawnEvent[] spawnEvents;
-
-    // ====================================================================
-    // SPAWN QUEUE SYSTEM
-    // ====================================================================
-
+    
     /// <summary>
-    /// Internal class tracking individual target spawn data
-    /// Simplified from original - removed path/rigidbody references
+    /// Element in spawn queue - stores prefab reference, not instance
+    /// FIXED: No longer stores GameObject instance until actual spawn
     /// </summary>
-    class SpawnQueueElement
+    [System.Serializable]
+    public class SpawnQueueElement
     {
-        /// <summary>GameObject instance of the spawned target</summary>
-        public GameObject obj;
-
-        /// <summary>Target component reference</summary>
-        public Target target;
-
-        /// <summary>TargetAI component reference (NEW)</summary>
-        public TargetAI targetAI;
-
-        /// <summary>Time remaining until this target should spawn</summary>
+        // Prefab to spawn (not an instance!)
+        public GameObject targetPrefab;
+        
+        // Time until spawn
         public float remainingTime;
+        
+        // Patrol route to assign
+        public Transform patrolRoute;
+        
+        // After spawning, we track the instance
+        public GameObject spawnedInstance;
+        public Target targetComponent;
+        public TargetAI aiComponent;
     }
-
-    /// <summary>Queue of targets waiting to be spawned</summary>
+    
+    // Queue of targets waiting to spawn
     Queue<SpawnQueueElement> m_SpawnQueue;
-
-    /// <summary>List of currently active (spawned) targets</summary>
+    
+    // List of active (spawned) targets
     List<SpawnQueueElement> m_ActiveElements;
-
+    
+    [Header("Debug")]
+    public bool showSpawnGizmos = true;
+    
     // ====================================================================
-    // INITIALIZATION
+    // INITIALIZATION - FIXED VERSION
     // ====================================================================
-
+    
     /// <summary>
-    /// Called when spawner is created
-    /// Instantiates all targets and queues them for delayed spawning
+    /// Initialize spawn queue WITHOUT instantiating targets
+    /// FIXED: Only queues spawn data, doesn't create GameObjects yet
     /// </summary>
     void Awake()
     {
         m_SpawnQueue = new Queue<SpawnQueueElement>();
-
-        // Create all targets from spawn events
+        m_ActiveElements = new List<SpawnQueueElement>();
+        
+        // Build spawn queue from configuration
         foreach (var spawnEvent in spawnEvents)
         {
-            // Validate spawn event
             if (spawnEvent.targetToSpawn == null)
             {
-                Debug.LogError($"TargetSpawner on {gameObject.name}: targetToSpawn is null in spawn event!");
+                Debug.LogWarning($"TargetSpawner: Null target in spawn event!");
                 continue;
             }
-
-            // Validate target prefab has required components
-            TargetAI prefabAI = spawnEvent.targetToSpawn.GetComponent<TargetAI>();
-            if (prefabAI == null)
+            
+            // Validate that prefab has required components
+            var prefabTarget = spawnEvent.targetToSpawn.GetComponentInChildren<Target>();
+            if (prefabTarget == null)
             {
-                Debug.LogError($"TargetSpawner: {spawnEvent.targetToSpawn.name} missing TargetAI component!");
+                Debug.LogError($"Spawn prefab {spawnEvent.targetToSpawn.name} missing Target component!");
                 continue;
             }
-
-            // Instantiate targets for this spawn event
+            
+            // Queue spawn data (NOT instances!)
             for (int i = 0; i < spawnEvent.count; ++i)
             {
-                // Create target instance
-                GameObject targetObj = Instantiate(
-                    spawnEvent.targetToSpawn,
-                    transform.position,
-                    transform.rotation
-                );
-
-                // Get component references
-                Target targetComponent = targetObj.GetComponentInChildren<Target>();
-                TargetAI aiComponent = targetObj.GetComponent<TargetAI>();
-
-                if (targetComponent == null)
-                {
-                    Debug.LogError($"TargetSpawner: Spawned target missing Target component!");
-                    Destroy(targetObj);
-                    continue;
-                }
-
-                if (aiComponent == null)
-                {
-                    Debug.LogError($"TargetSpawner: Spawned target missing TargetAI component!");
-                    Destroy(targetObj);
-                    continue;
-                }
-
-                // Assign patrol route
-                if (spawnEvent.patrolRoute != null)
-                {
-                    aiComponent.patrolRoute = spawnEvent.patrolRoute;
-                }
-                else
-                {
-                    Debug.LogWarning($"TargetSpawner: No patrol route assigned for {targetObj.name}");
-                }
-
-                // Disable target initially (will activate after delay)
-                targetObj.SetActive(false);
-
-                // Create spawn queue element
                 SpawnQueueElement element = new SpawnQueueElement()
                 {
-                    obj = targetObj,
-                    target = targetComponent,
-                    targetAI = aiComponent,
-                    remainingTime = i * spawnEvent.timeBetweenSpawn
+                    targetPrefab = spawnEvent.targetToSpawn,  // Store prefab reference
+                    patrolRoute = spawnEvent.patrolRoute,     // Store route reference
+                    remainingTime = i * spawnEvent.timeBetweenSpawn  // Calculate spawn delay
                 };
-
-                // Add to spawn queue
+                
                 m_SpawnQueue.Enqueue(element);
             }
+            
+            Debug.Log($"Queued {spawnEvent.count} spawns of {spawnEvent.targetToSpawn.name}");
         }
-
-        // Check if we have anything to spawn
+        
+        // Log warning if no targets queued
         if (m_SpawnQueue.Count == 0)
         {
             Debug.LogWarning($"TargetSpawner on {gameObject.name}: No targets queued for spawning!");
-            Destroy(gameObject);
+            // NOTE: We do NOT destroy the spawner - it might be configured later
         }
         else
         {
-            m_ActiveElements = new List<SpawnQueueElement>();
-            Debug.Log($"TargetSpawner: Queued {m_SpawnQueue.Count} targets for spawning");
+            Debug.Log($"TargetSpawner ready with {m_SpawnQueue.Count} targets queued");
         }
     }
-
+    
     // ====================================================================
-    // UPDATE - SPAWN TIMING
+    // SPAWN TIMING & INSTANTIATION - FIXED VERSION
     // ====================================================================
-
+    
     /// <summary>
-    /// Called every frame
-    /// Manages spawn timing - activates targets when their delay expires
+    /// Update spawn timers and instantiate targets when ready
+    /// FIXED: Now instantiates targets just-in-time instead of pre-creating
     /// </summary>
     void Update()
     {
-        // Check if there are targets waiting to spawn
+        // Process spawn queue
         if (m_SpawnQueue.Count > 0)
         {
-            // Get next target in queue (without removing it yet)
             var element = m_SpawnQueue.Peek();
-
-            // Decrement spawn timer
+            
+            // Countdown timer
             element.remainingTime -= Time.deltaTime;
-
-            // Time to spawn this target?
+            
+            // Time to spawn!
             if (element.remainingTime <= 0)
             {
-                // Remove from queue and activate
                 m_SpawnQueue.Dequeue();
-                element.obj.SetActive(true);
-                m_ActiveElements.Add(element);
-
-                Debug.Log($"TargetSpawner: Spawned {element.obj.name}");
+                SpawnTarget(element);
             }
         }
-
-        // Optional: Remove destroyed targets from active list
+        
+        // Update active targets (check if destroyed)
         for (int i = m_ActiveElements.Count - 1; i >= 0; i--)
         {
-            if (m_ActiveElements[i].target.Destroyed)
+            var element = m_ActiveElements[i];
+            
+            // Remove destroyed targets from active list
+            if (element.spawnedInstance == null || 
+                (element.targetComponent != null && element.targetComponent.Destroyed))
             {
                 m_ActiveElements.RemoveAt(i);
+                Debug.Log($"Removed destroyed target from active list");
             }
         }
-
-        // Optional: Destroy spawner when all targets are destroyed
-        if (m_SpawnQueue.Count == 0 && m_ActiveElements.Count == 0)
-        {
-            Debug.Log($"TargetSpawner: All targets destroyed - removing spawner");
-            Destroy(gameObject);
-        }
     }
-}
-
-// ====================================================================
-// CUSTOM INSPECTOR (OPTIONAL)
-// ====================================================================
-
-#if UNITY_EDITOR
-[CustomEditor(typeof(TargetSpawner))]
-public class TargetSpawnerEditor : Editor
-{
-    TargetSpawner m_TargetSpawner;
-
-    void OnEnable()
+    
+    /// <summary>
+    /// Spawn a target at the spawner location
+    /// FIXED: This is where instantiation happens (not in Awake)
+    /// </summary>
+    void SpawnTarget(SpawnQueueElement element)
     {
-        m_TargetSpawner = target as TargetSpawner;
-    }
-
-    public override void OnInspectorGUI()
-    {
-        base.OnInspectorGUI();
-
-        EditorGUILayout.Space();
-        EditorGUILayout.LabelField("NavMesh Spawner", EditorStyles.boldLabel);
-        EditorGUILayout.HelpBox(
-            "This spawner creates NavMesh-based AI targets.\n" +
-            "Ensure each target prefab has:\n" +
-            "- Target component\n" +
-            "- TargetAI component\n" +
-            "- NavMeshAgent component",
-            MessageType.Info
+        // Calculate spawn position (with optional randomization)
+        Vector3 spawnPosition = CalculateSpawnPosition();
+        
+        // FIXED: Instantiate the target NOW (when it's time to spawn)
+        GameObject targetObj = Instantiate(
+            element.targetPrefab,
+            spawnPosition,
+            transform.rotation
         );
-
-        // Validation button
-        if (GUILayout.Button("Validate Spawn Events"))
+        
+        // Store the spawned instance
+        element.spawnedInstance = targetObj;
+        
+        // Get components
+        element.targetComponent = targetObj.GetComponentInChildren<Target>();
+        element.aiComponent = targetObj.GetComponentInChildren<TargetAI>();
+        
+        // Configure AI if present
+        if (element.aiComponent != null)
         {
-            ValidateSpawnEvents();
+            // Assign patrol route
+            if (element.patrolRoute != null)
+            {
+                element.aiComponent.patrolRoute = element.patrolRoute;
+                Debug.Log($"Assigned patrol route to {targetObj.name}");
+            }
+            else
+            {
+                Debug.LogWarning($"No patrol route for AI target {targetObj.name}");
+            }
+            
+            // NavMeshAgent is now properly on the NavMesh at spawn position
+            // The AI's Start() method will initialize it correctly
+        }
+        
+        // Add to active list
+        m_ActiveElements.Add(element);
+        
+        // Log spawn
+        Debug.Log($"Spawned {targetObj.name} at {spawnPosition}");
+        
+        // Optional: Spawn effects
+        PlaySpawnEffects(spawnPosition);
+    }
+    
+    /// <summary>
+    /// Calculate spawn position with optional randomization
+    /// </summary>
+    Vector3 CalculateSpawnPosition()
+    {
+        Vector3 basePosition = transform.position;
+        
+        if (spawnRadius > 0)
+        {
+            // Add random offset within radius
+            Vector2 randomCircle = Random.insideUnitCircle * spawnRadius;
+            basePosition += new Vector3(randomCircle.x, 0, randomCircle.y);
+            
+            // Ensure spawn position is on NavMesh
+            UnityEngine.AI.NavMeshHit hit;
+            if (UnityEngine.AI.NavMesh.SamplePosition(basePosition, out hit, spawnRadius, UnityEngine.AI.NavMesh.AllAreas))
+            {
+                basePosition = hit.position;
+            }
+        }
+        
+        return basePosition;
+    }
+    
+    /// <summary>
+    /// Optional spawn effects (particles, sound, etc.)
+    /// </summary>
+    void PlaySpawnEffects(Vector3 position)
+    {
+        // Could add:
+        // - Spawn particle effect
+        // - Spawn sound
+        // - Camera shake
+        // - UI notification
+    }
+    
+    // ====================================================================
+    // PUBLIC INTERFACE
+    // ====================================================================
+    
+    /// <summary>
+    /// Get count of targets waiting to spawn
+    /// </summary>
+    public int GetQueuedCount()
+    {
+        return m_SpawnQueue.Count;
+    }
+    
+    /// <summary>
+    /// Get count of active (spawned) targets
+    /// </summary>
+    public int GetActiveCount()
+    {
+        return m_ActiveElements.Count;
+    }
+    
+    /// <summary>
+    /// Force spawn all queued targets immediately
+    /// </summary>
+    [ContextMenu("Force Spawn All")]
+    public void ForceSpawnAll()
+    {
+        while (m_SpawnQueue.Count > 0)
+        {
+            var element = m_SpawnQueue.Dequeue();
+            SpawnTarget(element);
         }
     }
-
-    void ValidateSpawnEvents()
+    
+    // ====================================================================
+    // DEBUG VISUALIZATION
+    // ====================================================================
+    
+    void OnDrawGizmos()
     {
-        bool allValid = true;
-
-        foreach (var spawnEvent in m_TargetSpawner.spawnEvents)
+        if (!showSpawnGizmos) return;
+        
+        // Draw spawn point
+        Gizmos.color = Color.yellow;
+        Gizmos.DrawWireSphere(transform.position, 0.5f);
+        
+        // Draw spawn radius
+        if (spawnRadius > 0)
         {
-            if (spawnEvent.targetToSpawn == null)
-            {
-                Debug.LogError("Spawn event has null targetToSpawn!");
-                allValid = false;
-                continue;
-            }
-
-            Target target = spawnEvent.targetToSpawn.GetComponentInChildren<Target>();
-            TargetAI ai = spawnEvent.targetToSpawn.GetComponent<TargetAI>();
-            UnityEngine.AI.NavMeshAgent agent = spawnEvent.targetToSpawn.GetComponent<UnityEngine.AI.NavMeshAgent>();
-
-            if (target == null)
-            {
-                Debug.LogError($"{spawnEvent.targetToSpawn.name} missing Target component!");
-                allValid = false;
-            }
-
-            if (ai == null)
-            {
-                Debug.LogError($"{spawnEvent.targetToSpawn.name} missing TargetAI component!");
-                allValid = false;
-            }
-
-            if (agent == null)
-            {
-                Debug.LogError($"{spawnEvent.targetToSpawn.name} missing NavMeshAgent component!");
-                allValid = false;
-            }
-
-            if (spawnEvent.patrolRoute == null)
-            {
-                Debug.LogWarning($"Spawn event for {spawnEvent.targetToSpawn.name} has no patrol route assigned!");
-            }
+            Gizmos.color = new Color(1, 1, 0, 0.3f);
+            Gizmos.DrawWireSphere(transform.position, spawnRadius);
         }
-
-        if (allValid)
+        
+        // Draw spawn direction
+        Gizmos.color = Color.yellow;
+        Gizmos.DrawRay(transform.position, transform.forward * 2f);
+    }
+    
+    void OnDrawGizmosSelected()
+    {
+        // Draw patrol routes when selected
+        foreach (var spawnEvent in spawnEvents)
         {
-            Debug.Log("All spawn events are valid!");
+            if (spawnEvent.patrolRoute != null)
+            {
+                Gizmos.color = Color.cyan;
+                
+                // Draw waypoints
+                foreach (Transform waypoint in spawnEvent.patrolRoute)
+                {
+                    Gizmos.DrawWireSphere(waypoint.position, 0.3f);
+                }
+                
+                // Connect to spawner
+                if (spawnEvent.patrolRoute.childCount > 0)
+                {
+                    Gizmos.DrawLine(transform.position, spawnEvent.patrolRoute.GetChild(0).position);
+                }
+            }
         }
     }
 }
-#endif
+
+// ============================================================================
+// END OF MODIFIED TARGETSPAWNER.CS
+// ============================================================================
+// 
+// KEY FIXES APPLIED:
+// 1. No longer pre-instantiates targets in Awake()
+// 2. Only stores prefab references in queue, not instances
+// 3. Instantiates targets just-in-time when spawn timer expires
+// 4. NavMeshAgents are created at proper spawn positions on NavMesh
+// 5. Proper cleanup of destroyed targets from active list
+// 
+// STUDENT LEARNING POINTS:
+// - Object lifecycle management
+// - Just-in-time vs pre-allocation strategies
+// - NavMeshAgent initialization requirements
+// - Component communication patterns
+// ============================================================================
 ```
 
----
+#### 4.4.2 SpawnEvent Configuration
+
+In the Unity Inspector, configure each `SpawnEvent`:
+
+1. **Target To Spawn**: Drag AI-enabled Target prefab
+2. **Count**: Number of targets to spawn
+3. **Time Between Spawn**: Delay between each spawn (seconds)
+4. **Patrol Route**: Assign waypoint parent object
+
+Example configuration for wave spawning:
+```
+SpawnEvent[0]:
+  - Target: "BasicEnemy" prefab
+  - Count: 3
+  - Time Between: 2.0
+  - Patrol Route: "PatrolRoute_A"
+
+SpawnEvent[1]:
+  - Target: "FastEnemy" prefab  
+  - Count: 2
+  - Time Between: 1.5
+  - Patrol Route: "PatrolRoute_B"
+```
+
+This creates a wave of 3 basic enemies followed by 2 fast enemies, each following different patrol routes.
+
+### Testing the Spawner
+
+1. **Create Spawner GameObject**:
+   - Add empty GameObject
+   - Add modified `TargetSpawner` component
+   - Position at spawn point
+
+2. **Setup Patrol Routes**:
+   - Create empty GameObject "PatrolRoute"
+   - Add child GameObjects as waypoints
+   - Position waypoints to form patrol path
+
+3. **Configure SpawnEvents**:
+   - Add Target prefabs with TargetAI
+   - Set spawn counts and timing
+   - Assign patrol routes
+
+4. **Test in Play Mode**:
+   - Targets should spawn at timed intervals
+   - Each should follow assigned patrol route
+   - NavMeshAgents should initialize correctly
+
+### Integration Notes
+
+- Spawner now works with both AI and non-AI targets
+- NavMeshAgent initialization happens at proper spawn position
+- No performance overhead from pre-instantiation
+- Compatible with object pooling systems if needed later
 
 ### 4.5 Phase 5: Room Connectivity
 

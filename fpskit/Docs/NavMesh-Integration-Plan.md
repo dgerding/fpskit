@@ -362,6 +362,7 @@ GameSystem.TargetDestroyed() updates score
 
 using UnityEngine;
 using Unity.AI.Navigation;
+using UnityEngine.AI;
 
 /// <summary>
 /// Handles per-room NavMesh baking for modular level architecture

@@ -237,18 +237,18 @@ public class LevelLayout : MonoBehaviour
 
 ```
 Player Fires Weapon
-    â†“
+    ↓
 Weapon.RaycastShot() performs raycast
-    â†“
+    ↓
 Raycast hits Target (Layer 10)
-    â†“
+    ↓
 Weapon calls: target.Got(damage)
-    â†“
+    ↓
 Target.Got() reduces health
-    â†“
+    ↓
 IF health > 0: Target survives (FLEE HERE)
 IF health <= 0: Target.Destroyed() called
-    â†“
+    ↓
 GameSystem.TargetDestroyed() updates score
 ```
 

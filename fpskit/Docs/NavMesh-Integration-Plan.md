@@ -1363,6 +1363,13 @@ public class TargetAI : MonoBehaviour
     public void StartFleeing()
     {
         if (currentState == AIState.Flee) return; // Already fleeing
+
+        // null check
+        if (_player == null)
+        {
+            Debug.LogWarning($"{gameObject.name} cannot flee - player reference is null");
+            return;
+        }
         
         // Calculate flee direction (away from player or damage source)
         Vector3 fleeDirection = transform.position - _player.position;

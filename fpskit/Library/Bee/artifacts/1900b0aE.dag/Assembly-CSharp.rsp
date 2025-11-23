@@ -479,6 +479,7 @@
 "Assets/Creator Kit - FPS/Scripts/System/Controller.cs"
 "Assets/Creator Kit - FPS/Scripts/System/EndCheckpoint.cs"
 "Assets/Creator Kit - FPS/Scripts/System/GameSystem.cs"
+"Assets/Creator Kit - FPS/Scripts/System/NavDestination.cs"
 "Assets/Creator Kit - FPS/Scripts/System/PoolSystem.cs"
 "Assets/Creator Kit - FPS/Scripts/System/Projectile.cs"
 "Assets/Creator Kit - FPS/Scripts/System/StartCheckpoint.cs"

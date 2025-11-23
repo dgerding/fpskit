@@ -153,19 +153,16 @@ public class LevelLayout : MonoBehaviour
         // Let NavMesh data settle before creating links
         yield return new WaitForSeconds(0.5f);
 
-        // ====================================================================
-        // PHASE 5: Uncomment when NavMeshRoomConnector.cs has been added
-        // ====================================================================
-        // NavMeshRoomConnector connector = GetComponent<NavMeshRoomConnector>();
-        // if (connector != null)
-        // {
-        //     // Connect all rooms via NavMeshLinks
-        //     connector.ConnectRoomNavMeshes();
-        // }
-        // else
-        // {
-        //     Debug.Log("NavMeshRoomConnector not found. Add it to enable multi-room navigation.");
-        // }
+        NavMeshRoomConnector connector = GetComponent<NavMeshRoomConnector>();
+        if (connector != null)
+        {
+            // Connect all rooms via NavMeshLinks
+            connector.ConnectRoomNavMeshes();
+        }
+        else
+        {
+            Debug.Log("NavMeshRoomConnector not found. Add it to enable multi-room navigation.");
+        }
 
         // Placeholder until Phase 5
         Debug.Log("NavMesh baking complete. Room connectivity (Phase 5) not yet implemented.");

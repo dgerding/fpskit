@@ -2372,58 +2372,164 @@ public class TargetSpawner : MonoBehaviour
 
 #### 4.4.2 SpawnEvent Configuration
 
-In the Unity Inspector, configure each `SpawnEvent`:
+#### 4.4.2 SpawnEvent Configuration (Unity Inspector Setup)
 
-1. **Target To Spawn**: Drag AI-enabled Target prefab
-2. **Count**: Number of targets to spawn
-3. **Time Between Spawn**: Delay between each spawn (seconds)
-4. **Patrol Route**: Assign waypoint parent object
+##### Understanding the New Architecture
 
-Example configuration for wave spawning:
+With the old PathSystem, the TargetSpawner owned both spawning AND movement—targets followed a path defined directly on the spawner. With the NavMesh refactor, responsibilities are now split:
+
+| Component | Responsibility |
+|-----------|----------------|
+| **TargetSpawner** | When and where targets appear |
+| **TargetAI** | How targets move (patrol, chase, flee) |
+| **Patrol Route** | Where targets patrol (waypoint positions) |
+
+This means the TargetSpawner's job is now simpler: spawn a target, hand it a patrol route reference, and let TargetAI handle everything else. The Inspector configuration reflects this delegation.
+
+##### What is a SpawnEvent?
+
+A `SpawnEvent` defines a "wave" of identical targets. Each SpawnEvent in the array spawns sequentially—all targets from SpawnEvent[0] spawn before SpawnEvent[1] begins. This creates natural difficulty progression.
+
 ```
-SpawnEvent[0]:
-  - Target: "BasicEnemy" prefab
-  - Count: 3
-  - Time Between: 2.0
-  - Patrol Route: "PatrolRoute_A"
-
-SpawnEvent[1]:
-  - Target: "FastEnemy" prefab  
-  - Count: 2
-  - Time Between: 1.5
-  - Patrol Route: "PatrolRoute_B"
+SpawnEvent[0]: 3 slow targets, 2 seconds apart  →  6 seconds total
+SpawnEvent[1]: 2 fast targets, 1.5 seconds apart →  3 seconds total
+                                                    ─────────────────
+                                                    9 seconds for full spawn sequence
 ```
 
-This creates a wave of 3 basic enemies followed by 2 fast enemies, each following different patrol routes.
+##### SpawnEvent Fields Explained
 
-### Testing the Spawner
+| Field | Type | Purpose |
+|-------|------|---------|
+| **Target To Spawn** | GameObject (Prefab) | The target prefab. Must have a `Target` component. Should have `TargetAI` + `NavMeshAgent` if you want AI behavior. |
+| **Count** | int | How many of this target type to spawn in this wave. |
+| **Time Between Spawn** | float | Seconds between each spawn within this wave. First target spawns immediately (t=0), second at t=timeBetweenSpawn, etc. |
+| **Patrol Route** | Transform | Parent GameObject containing waypoint children. TargetSpawner passes this to TargetAI.patrolRoute at spawn time. |
 
-1. **Create Spawner GameObject**:
-   - Add empty GameObject
-   - Add modified `TargetSpawner` component
-   - Position at spawn point
+##### What is a Patrol Route?
 
-2. **Setup Patrol Routes**:
-   - Create empty GameObject "PatrolRoute"
-   - Add child GameObjects as waypoints
-   - Position waypoints to form patrol path
+A patrol route is simply a **parent GameObject with child GameObjects as waypoints**. TargetAI iterates through these children in order.
 
-3. **Configure SpawnEvents**:
-   - Add Target prefabs with TargetAI
-   - Set spawn counts and timing
-   - Assign patrol routes
+```
+Hierarchy Example:
+├── PatrolRoute_Hallway        ← Drag THIS into "Patrol Route" field
+│   ├── Waypoint_0             ← First destination (child index 0)
+│   ├── Waypoint_1             ← Second destination (child index 1)
+│   ├── Waypoint_2             ← Third destination (child index 2)
+│   └── Waypoint_3             ← Fourth destination, then loops to 0
+```
 
-4. **Test in Play Mode**:
-   - Targets should spawn at timed intervals
-   - Each should follow assigned patrol route
-   - NavMeshAgents should initialize correctly
+**Why Transform children instead of a custom PathSystem?**
 
-### Integration Notes
+- Simpler to set up (just empty GameObjects)
+- Visible in Scene view without custom editor
+- Works naturally with Unity's hierarchy
+- TargetAI can iterate with `foreach (Transform child in patrolRoute)`
 
-- Spawner now works with both AI and non-AI targets
-- NavMeshAgent initialization happens at proper spawn position
-- No performance overhead from pre-instantiation
-- Compatible with object pooling systems if needed later
+**Optional Enhancement**: Add `NavDestination` components to waypoints for typed behavior (Patrol, Ambush, CoverPoint) and wait times. But plain empty GameObjects work fine for basic patrol.
+
+##### Step-by-Step Configuration
+
+**Step 1: Create Patrol Routes (do this first)**
+
+You need patrol routes to exist before you can assign them to SpawnEvents.
+
+1. In Hierarchy, create empty GameObject: `GameObject > Create Empty`
+2. Rename it descriptively: "PatrolRoute_RoomA" or "PatrolRoute_Perimeter"
+3. Position the parent anywhere (its position doesn't matter—only children matter)
+4. Add child empty GameObjects as waypoints:
+   - Right-click parent → Create Empty
+   - Rename: "Waypoint_0", "Waypoint_1", etc.
+   - Position each waypoint where you want the AI to walk
+5. Repeat for additional patrol routes
+
+**Tip**: In Scene view, waypoints are invisible by default. Add a small sphere mesh (disabled at runtime) or use the NavDestination component's Gizmo for visibility.
+
+**Step 2: Prepare Target Prefabs**
+
+Your target prefab needs these components for full AI behavior:
+
+| Component | Required? | Purpose |
+|-----------|-----------|---------|
+| Target | ✅ Yes | Health, damage, destruction, scoring |
+| TargetAI | ✅ For AI | State machine (Patrol/Chase/Flee) |
+| NavMeshAgent | ✅ For AI | Pathfinding and movement |
+| Rigidbody | Optional | Only if using physics interactions |
+| Collider | ✅ Yes | For raycasts (shooting) to detect hits |
+
+If a prefab has no TargetAI, it will spawn but won't move—useful for stationary targets.
+
+**Step 3: Configure TargetSpawner Component**
+
+1. Select or create a GameObject where targets should spawn
+2. Add Component → TargetSpawner
+3. Set **Spawn Radius**: How far from the spawner position targets can appear (randomized within circle)
+4. Expand **Spawn Events** array
+5. Set array size (e.g., 2 for two waves)
+6. For each SpawnEvent:
+   - **Target To Spawn**: Drag prefab from Project window
+   - **Count**: Number to spawn in this wave
+   - **Time Between Spawn**: Delay between each
+   - **Patrol Route**: Drag patrol route GameObject from Hierarchy
+
+##### Example Configuration
+
+**Scenario**: Training room with warm-up targets, then challenging fast movers.
+
+```
+TargetSpawner (Component on "SpawnPoint_TrainingRoom")
+├── Spawn Radius: 1.5
+├── Spawn Events: 2 elements
+│
+├── [0] SpawnEvent
+│   ├── Target To Spawn: "Target_Basic" (prefab)
+│   ├── Count: 3
+│   ├── Time Between Spawn: 2.0
+│   └── Patrol Route: "PatrolRoute_SlowLoop" (scene object)
+│
+└── [1] SpawnEvent
+    ├── Target To Spawn: "Target_Fast" (prefab)
+    ├── Count: 2
+    ├── Time Between Spawn: 1.0
+    └── Patrol Route: "PatrolRoute_Zigzag" (scene object)
+```
+
+**What happens at runtime**:
+
+1. t=0.0s: Basic target #1 spawns, TargetAI receives PatrolRoute_SlowLoop
+2. t=2.0s: Basic target #2 spawns
+3. t=4.0s: Basic target #3 spawns
+4. t=4.0s: Fast target #1 spawns (SpawnEvent[1] begins), TargetAI receives PatrolRoute_Zigzag
+5. t=5.0s: Fast target #2 spawns
+
+Each target's TargetAI.Start() reads its assigned patrolRoute and begins navigating to Waypoint_0.
+
+##### Testing Checklist
+
+| Test | Expected Result | If Failing |
+|------|-----------------|------------|
+| Enter Play Mode | Console shows "Queued X spawns of [prefab]" | Check SpawnEvents aren't empty |
+| Wait for spawn timer | Console shows "Spawned [name] at [position]" | Check prefab reference is valid |
+| Target appears on NavMesh | Target visible, not falling through floor | Verify NavMesh is baked, spawn point is on NavMesh |
+| Target moves to waypoint | Target walks toward first waypoint | Check TargetAI + NavMeshAgent on prefab, patrol route assigned |
+| Target patrols loop | Target visits waypoints in order, loops | Check patrol route has multiple children |
+
+##### Common Mistakes
+
+| Mistake | Symptom | Fix |
+|---------|---------|-----|
+| Patrol route has no children | Target spawns but stands still | Add waypoint child GameObjects |
+| Prefab missing NavMeshAgent | Console error, no movement | Add NavMeshAgent component to prefab |
+| Spawn point not on NavMesh | Target falls or warps | Move spawner to NavMesh area, or increase spawnRadius |
+| Forgot to bake NavMesh | Agent can't find path | Window > AI > Navigation, bake surfaces |
+| Assigned prefab instead of scene object for patrol route | Null reference at runtime | Patrol Route must be a scene hierarchy object, not a prefab |
+
+##### Integration Notes
+
+- **Non-AI targets**: If prefab lacks TargetAI, spawner still works—target appears but doesn't move. Useful for stationary turrets or popup targets.
+- **Multiple spawners**: Each spawner operates independently. Use multiple spawners for different spawn points with different timing.
+- **Shared patrol routes**: Multiple SpawnEvents (or multiple spawners) can reference the same patrol route. All targets using it will follow the same waypoints.
+- **Runtime patrol changes**: TargetAI.patrolRoute is public—you could reassign it mid-game for dynamic behavior.
 
 ### 4.5 Phase 5: Room Connectivity
 

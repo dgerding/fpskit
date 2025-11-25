@@ -2016,42 +2016,42 @@ public class TargetSpawner : MonoBehaviour
     // ====================================================================
     // SPAWN CONFIGURATION
     // ====================================================================
-    
+
     [System.Serializable]
     public class SpawnEvent
     {
         [Tooltip("Target prefab with TargetAI component")]
         public GameObject targetToSpawn;
-        
+
         [Tooltip("Number of this target type to spawn")]
         public int count = 1;
-        
+
         [Tooltip("Delay between spawning each target")]
         public float timeBetweenSpawn = 1.0f;
-        
+
         [Tooltip("Patrol route for spawned AI (optional)")]
         public Transform patrolRoute;
-        
+
         // Could add more per-spawn settings:
         // public float aiDetectionRange = 15f;
         // public float aiMoveSpeed = 3.5f;
     }
-    
+
     [Header("Spawn Configuration")]
     [Tooltip("List of spawn waves/events")]
     public SpawnEvent[] spawnEvents = new SpawnEvent[0];
-    
+
     [Header("Spawn Position")]
     [Tooltip("Randomize spawn position within radius")]
     public float spawnRadius = 2f;
-    
+
     [Tooltip("Check for clear spawn location")]
     public bool ensureClearSpawn = true;
-    
+
     // ====================================================================
     // SPAWN QUEUE SYSTEM - FIXED VERSION
     // ====================================================================
-    
+
     /// <summary>
     /// Element in spawn queue - stores prefab reference, not instance
     /// FIXED: No longer stores GameObject instance until actual spawn
@@ -2061,32 +2061,32 @@ public class TargetSpawner : MonoBehaviour
     {
         // Prefab to spawn (not an instance!)
         public GameObject targetPrefab;
-        
+
         // Time until spawn
         public float remainingTime;
-        
+
         // Patrol route to assign
         public Transform patrolRoute;
-        
+
         // After spawning, we track the instance
         public GameObject spawnedInstance;
         public Target targetComponent;
         public TargetAI aiComponent;
     }
-    
+
     // Queue of targets waiting to spawn
     Queue<SpawnQueueElement> m_SpawnQueue;
-    
+
     // List of active (spawned) targets
     List<SpawnQueueElement> m_ActiveElements;
-    
+
     [Header("Debug")]
     public bool showSpawnGizmos = true;
-    
+
     // ====================================================================
     // INITIALIZATION - FIXED VERSION
     // ====================================================================
-    
+
     /// <summary>
     /// Initialize spawn queue WITHOUT instantiating targets
     /// FIXED: Only queues spawn data, doesn't create GameObjects yet
@@ -2095,7 +2095,7 @@ public class TargetSpawner : MonoBehaviour
     {
         m_SpawnQueue = new Queue<SpawnQueueElement>();
         m_ActiveElements = new List<SpawnQueueElement>();
-        
+
         // Build spawn queue from configuration
         foreach (var spawnEvent in spawnEvents)
         {
@@ -2104,15 +2104,15 @@ public class TargetSpawner : MonoBehaviour
                 Debug.LogWarning($"TargetSpawner: Null target in spawn event!");
                 continue;
             }
-            
+
             // Validate that prefab has required components
-            var prefabTarget = spawnEvent.targetToSpawn.GetComponentInChildren<Target>();
-            if (prefabTarget == null)
+            var prefabAI = spawnEvent.targetToSpawn.GetComponentInChildren<TargetAI>();
+            if (prefabAI == null && spawnEvent.patrolRoute != null)
             {
-                Debug.LogError($"Spawn prefab {spawnEvent.targetToSpawn.name} missing Target component!");
-                continue;
+                Debug.LogWarning($"Prefab {spawnEvent.targetToSpawn.name} has patrol route but no TargetAI!");
             }
-            
+
+
             // Queue spawn data (NOT instances!)
             for (int i = 0; i < spawnEvent.count; ++i)
             {
@@ -2122,13 +2122,13 @@ public class TargetSpawner : MonoBehaviour
                     patrolRoute = spawnEvent.patrolRoute,     // Store route reference
                     remainingTime = i * spawnEvent.timeBetweenSpawn  // Calculate spawn delay
                 };
-                
+
                 m_SpawnQueue.Enqueue(element);
             }
-            
+
             Debug.Log($"Queued {spawnEvent.count} spawns of {spawnEvent.targetToSpawn.name}");
         }
-        
+
         // Log warning if no targets queued
         if (m_SpawnQueue.Count == 0)
         {
@@ -2140,11 +2140,11 @@ public class TargetSpawner : MonoBehaviour
             Debug.Log($"TargetSpawner ready with {m_SpawnQueue.Count} targets queued");
         }
     }
-    
+
     // ====================================================================
     // SPAWN TIMING & INSTANTIATION - FIXED VERSION
     // ====================================================================
-    
+
     /// <summary>
     /// Update spawn timers and instantiate targets when ready
     /// FIXED: Now instantiates targets just-in-time instead of pre-creating
@@ -2155,10 +2155,10 @@ public class TargetSpawner : MonoBehaviour
         if (m_SpawnQueue.Count > 0)
         {
             var element = m_SpawnQueue.Peek();
-            
+
             // Countdown timer
             element.remainingTime -= Time.deltaTime;
-            
+
             // Time to spawn!
             if (element.remainingTime <= 0)
             {
@@ -2166,14 +2166,14 @@ public class TargetSpawner : MonoBehaviour
                 SpawnTarget(element);
             }
         }
-        
+
         // Update active targets (check if destroyed)
         for (int i = m_ActiveElements.Count - 1; i >= 0; i--)
         {
             var element = m_ActiveElements[i];
-            
+
             // Remove destroyed targets from active list
-            if (element.spawnedInstance == null || 
+            if (element.spawnedInstance == null ||
                 (element.targetComponent != null && element.targetComponent.Destroyed))
             {
                 m_ActiveElements.RemoveAt(i);
@@ -2181,7 +2181,7 @@ public class TargetSpawner : MonoBehaviour
             }
         }
     }
-    
+
     /// <summary>
     /// Spawn a target at the spawner location
     /// FIXED: This is where instantiation happens (not in Awake)
@@ -2190,21 +2190,21 @@ public class TargetSpawner : MonoBehaviour
     {
         // Calculate spawn position (with optional randomization)
         Vector3 spawnPosition = CalculateSpawnPosition();
-        
+
         // FIXED: Instantiate the target NOW (when it's time to spawn)
         GameObject targetObj = Instantiate(
             element.targetPrefab,
             spawnPosition,
             transform.rotation
         );
-        
+
         // Store the spawned instance
         element.spawnedInstance = targetObj;
-        
+
         // Get components
         element.targetComponent = targetObj.GetComponentInChildren<Target>();
         element.aiComponent = targetObj.GetComponentInChildren<TargetAI>();
-        
+
         // Configure AI if present
         if (element.aiComponent != null)
         {
@@ -2218,34 +2218,34 @@ public class TargetSpawner : MonoBehaviour
             {
                 Debug.LogWarning($"No patrol route for AI target {targetObj.name}");
             }
-            
+
             // NavMeshAgent is now properly on the NavMesh at spawn position
             // The AI's Start() method will initialize it correctly
         }
-        
+
         // Add to active list
         m_ActiveElements.Add(element);
-        
+
         // Log spawn
         Debug.Log($"Spawned {targetObj.name} at {spawnPosition}");
-        
+
         // Optional: Spawn effects
         PlaySpawnEffects(spawnPosition);
     }
-    
+
     /// <summary>
     /// Calculate spawn position with optional randomization
     /// </summary>
     Vector3 CalculateSpawnPosition()
     {
         Vector3 basePosition = transform.position;
-        
+
         if (spawnRadius > 0)
         {
             // Add random offset within radius
             Vector2 randomCircle = Random.insideUnitCircle * spawnRadius;
             basePosition += new Vector3(randomCircle.x, 0, randomCircle.y);
-            
+
             // Ensure spawn position is on NavMesh
             UnityEngine.AI.NavMeshHit hit;
             if (UnityEngine.AI.NavMesh.SamplePosition(basePosition, out hit, spawnRadius, UnityEngine.AI.NavMesh.AllAreas))
@@ -2253,10 +2253,10 @@ public class TargetSpawner : MonoBehaviour
                 basePosition = hit.position;
             }
         }
-        
+
         return basePosition;
     }
-    
+
     /// <summary>
     /// Optional spawn effects (particles, sound, etc.)
     /// </summary>
@@ -2268,11 +2268,11 @@ public class TargetSpawner : MonoBehaviour
         // - Camera shake
         // - UI notification
     }
-    
+
     // ====================================================================
     // PUBLIC INTERFACE
     // ====================================================================
-    
+
     /// <summary>
     /// Get count of targets waiting to spawn
     /// </summary>
@@ -2280,7 +2280,7 @@ public class TargetSpawner : MonoBehaviour
     {
         return m_SpawnQueue.Count;
     }
-    
+
     /// <summary>
     /// Get count of active (spawned) targets
     /// </summary>
@@ -2288,7 +2288,7 @@ public class TargetSpawner : MonoBehaviour
     {
         return m_ActiveElements.Count;
     }
-    
+
     /// <summary>
     /// Force spawn all queued targets immediately
     /// </summary>
@@ -2301,31 +2301,31 @@ public class TargetSpawner : MonoBehaviour
             SpawnTarget(element);
         }
     }
-    
+
     // ====================================================================
     // DEBUG VISUALIZATION
     // ====================================================================
-    
+
     void OnDrawGizmos()
     {
         if (!showSpawnGizmos) return;
-        
+
         // Draw spawn point
         Gizmos.color = Color.yellow;
         Gizmos.DrawWireSphere(transform.position, 0.5f);
-        
+
         // Draw spawn radius
         if (spawnRadius > 0)
         {
             Gizmos.color = new Color(1, 1, 0, 0.3f);
             Gizmos.DrawWireSphere(transform.position, spawnRadius);
         }
-        
+
         // Draw spawn direction
         Gizmos.color = Color.yellow;
         Gizmos.DrawRay(transform.position, transform.forward * 2f);
     }
-    
+
     void OnDrawGizmosSelected()
     {
         // Draw patrol routes when selected
@@ -2334,13 +2334,13 @@ public class TargetSpawner : MonoBehaviour
             if (spawnEvent.patrolRoute != null)
             {
                 Gizmos.color = Color.cyan;
-                
+
                 // Draw waypoints
                 foreach (Transform waypoint in spawnEvent.patrolRoute)
                 {
                     Gizmos.DrawWireSphere(waypoint.position, 0.3f);
                 }
-                
+
                 // Connect to spawner
                 if (spawnEvent.patrolRoute.childCount > 0)
                 {

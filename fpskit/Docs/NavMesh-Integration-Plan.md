@@ -2817,26 +2817,26 @@ Fleeing behavior is implemented as a **state transition** within the existing Ta
 │                                                             │
 │  Player fires weapon                                        │
 │         ↓                                                   │
-│  Weapon.RaycastShot() hits Target                          │
+│  Weapon.RaycastShot() hits Target                           │
 │         ↓                                                   │
 │  Target.Got(damage) called                                  │
 │         ↓                                                   │
 │  Health reduced: m_CurrentHealth -= damage                  │
 │         ↓                                                   │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │  IF m_CurrentHealth > 0:                            │   │
-│  │     → Target survives                               │   │
-│  │     → Call targetAI.StartFleeing()  ← NEW HOOK      │   │
-│  │     → TargetAI enters Flee state                    │   │
-│  │     → NavMeshAgent pathfinds away from player       │   │
-│  │     → After fleeDuration, returns to Patrol         │   │
-│  ├─────────────────────────────────────────────────────┤   │
-│  │  IF m_CurrentHealth <= 0:                           │   │
-│  │     → Target destroyed                              │   │
-│  │     → Call targetAI.StopMovement()  ← CLEANUP       │   │
-│  │     → GameSystem.TargetDestroyed() updates score    │   │
-│  │     → GameObject deactivated                        │   │
-│  └─────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │  IF m_CurrentHealth > 0:                            │    │
+│  │     → Target survives                               │    │
+│  │     → Call targetAI.StartFleeing()  ← NEW HOOK      │    │
+│  │     → TargetAI enters Flee state                    │    │
+│  │     → NavMeshAgent pathfinds away from player       │    │
+│  │     → After fleeDuration, returns to Patrol         │    │
+│  ├─────────────────────────────────────────────────────┤    │
+│  │  IF m_CurrentHealth <= 0:                           │    │
+│  │     → Target destroyed                              │    │
+│  │     → Call targetAI.StopMovement()  ← CLEANUP       │    │
+│  │     → GameSystem.TargetDestroyed() updates score    │    │
+│  │     → GameObject deactivated                        │    │
+│  └─────────────────────────────────────────────────────┘    │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```

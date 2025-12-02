@@ -2806,793 +2806,891 @@ public class NavMeshRoomConnector : MonoBehaviour
 
 ## 5. Fleeing Behavior Implementation
 
-Three approaches based on project needs:
+### 5.1 Architecture Overview
 
-### 5.1 Implementation A: NavMesh-Based Flee (Already in TargetAI)
+Fleeing behavior is implemented as a **state transition** within the existing TargetAI state machine, not as a separate system. When a target is damaged but not destroyed, the Target component notifies TargetAI to enter the Flee state.
 
-The `TargetAI.cs` script already includes fleeing in its state machine:
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    DAMAGE → FLEE FLOW                       │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Player fires weapon                                        │
+│         ↓                                                   │
+│  Weapon.RaycastShot() hits Target                          │
+│         ↓                                                   │
+│  Target.Got(damage) called                                  │
+│         ↓                                                   │
+│  Health reduced: m_CurrentHealth -= damage                  │
+│         ↓                                                   │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │  IF m_CurrentHealth > 0:                            │   │
+│  │     → Target survives                               │   │
+│  │     → Call targetAI.StartFleeing()  ← NEW HOOK      │   │
+│  │     → TargetAI enters Flee state                    │   │
+│  │     → NavMeshAgent pathfinds away from player       │   │
+│  │     → After fleeDuration, returns to Patrol         │   │
+│  ├─────────────────────────────────────────────────────┤   │
+│  │  IF m_CurrentHealth <= 0:                           │   │
+│  │     → Target destroyed                              │   │
+│  │     → Call targetAI.StopMovement()  ← CLEANUP       │   │
+│  │     → GameSystem.TargetDestroyed() updates score    │   │
+│  │     → GameObject deactivated                        │   │
+│  └─────────────────────────────────────────────────────┘   │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Key Insight**: The flee behavior logic already exists in `TargetAI.StartFleeing()` (deployed in Phase 2). This phase only adds the **trigger**—the connection between taking damage and entering the flee state.
+
+### 5.2 Understanding TargetAI.StartFleeing()
+
+The `TargetAI.cs` script (already deployed) contains this method:
 
 ```csharp
+/// <summary>
+/// Called by Target.cs when damaged but not destroyed
+/// Triggers flee behavior using NavMesh pathfinding
+/// </summary>
 public void StartFleeing()
 {
-    if (currentState == AIState.Flee) return;
+    if (currentState == AIState.Flee) return; // Already fleeing
+
+    // Null check for player reference
+    if (_player == null)
+    {
+        Debug.LogWarning($"{gameObject.name} cannot flee - player reference is null");
+        return;
+    }
     
-    // Calculate flee direction (away from player)
+    // Calculate flee direction (AWAY from player)
+    // Vector math: (target position - player position) points away from player
     Vector3 fleeDirection = transform.position - _player.position;
-    fleeDirection.y = 0;
+    fleeDirection.y = 0; // Keep on horizontal plane
     fleeDirection.Normalize();
     
     // Calculate flee destination
     _fleeDestination = transform.position + (fleeDirection * fleeDistance);
     
-    // Sample to nearest point on NavMesh
+    // Sample to nearest valid point on NavMesh
     NavMeshHit hit;
     if (NavMesh.SamplePosition(_fleeDestination, out hit, fleeDistance, NavMesh.AllAreas))
     {
         _fleeDestination = hit.position;
     }
     
+    // Transition to Flee state
     SetState(AIState.Flee);
 }
 ```
 
-This is the recommended approach for NavMesh-based enemies.
+**What happens in the Flee state:**
 
-### 5.2 Implementation B: Simple Physics-Based Flee (Alternative)
+1. NavMeshAgent speed increases to `fleeSpeed` (default: 7)
+2. Agent pathfinds to `_fleeDestination` (away from player)
+3. Timer counts down for `fleeDuration` seconds (default: 3)
+4. When timer expires, state transitions back to Patrol
+5. Agent resumes waypoint navigation
 
-For targets without NavMesh (flying enemies, simple obstacles):
+This is all handled by the TargetAI state machine—no additional code needed for the flee behavior itself.
+
+### 5.3 Modified Target.cs
+
+The only code change required is in `Target.cs`. This modification:
+
+1. Caches a reference to the TargetAI component (if present)
+2. Calls `StartFleeing()` when damaged but not destroyed
+3. Calls `StopMovement()` before destruction for clean NavMeshAgent shutdown
+
+#### 5.3.1 Complete Modified Target.cs
 
 ```csharp
-// Location: Create new file at Assets/Creator Kit - FPS/Scripts/AI/SimpleTargetFlee.cs
-// Purpose: Non-NavMesh fleeing for simple targets using physics
-// Use Case: Flying enemies, turrets, or obstacles that don't use NavMesh
+// Location: Assets/Creator Kit - FPS/Scripts/System/Target.cs
+// Modification: Add TargetAI integration for flee behavior
+// Changes marked with // NAVMESH ADDITION comments
 
+using System.Collections;
+using System.Collections.Generic;
 using UnityEngine;
 
 /// <summary>
-/// Simple flee behavior using physics movement
-/// For targets that don't use NavMesh pathfinding
+/// Shootable target with health, damage handling, and AI integration
 /// 
-/// FIXED: Correct flee direction calculation
-/// FIXED: Uses Rigidbody.MovePosition for physics-safe movement
-/// 
-/// STUDENT LEARNING:
-/// - Vector math for directional movement
-/// - Physics-based vs transform-based movement
-/// - Time-based state management
+/// NAVMESH MODIFICATIONS:
+/// - Added TargetAI reference caching
+/// - Added flee trigger when damaged but not destroyed
+/// - Added movement cleanup before destruction
 /// </summary>
-[RequireComponent(typeof(Rigidbody))]
-public class SimpleTargetFlee : MonoBehaviour
+public class Target : MonoBehaviour
 {
-    [Header("Flee Configuration")]
-    [Tooltip("How fast to flee")]
-    public float fleeSpeed = 5f;
+    // ========================================================================
+    // PUBLIC FIELDS - Inspector Configuration
+    // ========================================================================
     
-    [Tooltip("How long to flee before stopping")]
-    public float fleeDuration = 3f;
+    [Header("Health Settings")]
+    [Tooltip("Maximum health points")]
+    public float health = 5.0f;
     
-    [Tooltip("Distance to flee from threat")]
-    public float fleeDistance = 10f;
+    [Header("Scoring")]
+    [Tooltip("Points awarded when destroyed")]
+    public int pointValue;
     
-    [Header("Movement Constraints")]
-    [Tooltip("Keep movement on horizontal plane")]
-    public bool constrainToHorizontal = true;
+    [Header("Audio")]
+    [Tooltip("Sound player for hit effects")]
+    public RandomPlayer HitPlayer;
     
-    [Tooltip("Return to original position after fleeing")]
-    public bool returnToOrigin = true;
+    [Header("Destruction Effects")]
+    [Tooltip("Objects to enable when destroyed (e.g., broken version)")]
+    public GameObject[] EnableOnDeath;
     
-    // State tracking
-    private bool isFleeing = false;
-    private float fleeTimer = 0f;
-    private Vector3 fleeDirection;
-    private Vector3 originalPosition;
+    // ========================================================================
+    // PRIVATE STATE
+    // ========================================================================
     
-    // Component references
-    private Rigidbody m_Rigidbody;
-    private Target m_Target;
+    /// <summary>Current health (decremented by damage)</summary>
+    private float m_CurrentHealth;
     
-    // ====================================================================
+    /// <summary>Has this target been destroyed?</summary>
+    private bool m_Destroyed = false;
+    
+    /// <summary>
+    /// Reference to AI controller (if present)
+    /// NAVMESH ADDITION: Cached for flee behavior trigger
+    /// </summary>
+    private TargetAI targetAI;
+    
+    // ========================================================================
+    // PROPERTIES
+    // ========================================================================
+    
+    /// <summary>
+    /// Public accessor for destroyed state
+    /// Used by TargetSpawner to track active targets
+    /// </summary>
+    public bool Destroyed => m_Destroyed;
+    
+    // ========================================================================
     // INITIALIZATION
-    // ====================================================================
-    
-    void Start()
-    {
-        // Cache original position for return behavior
-        originalPosition = transform.position;
-        
-        // Get required components
-        m_Rigidbody = GetComponent<Rigidbody>();
-        if (m_Rigidbody == null)
-        {
-            Debug.LogError($"SimpleTargetFlee on {gameObject.name} requires Rigidbody!");
-            enabled = false;
-            return;
-        }
-        
-        // Get Target component for damage integration
-        m_Target = GetComponent<Target>();
-        
-        // Ensure Rigidbody is configured for kinematic movement
-        // This prevents gravity and other forces from affecting our controlled movement
-        m_Rigidbody.isKinematic = true;
-    }
-    
-    // ====================================================================
-    // PHYSICS UPDATE - FIXED VERSION
-    // ====================================================================
+    // ========================================================================
     
     /// <summary>
-    /// Use FixedUpdate for physics-based movement
-    /// FIXED: Now uses Rigidbody.MovePosition instead of transform manipulation
+    /// Called when object is first created
+    /// Sets layer and caches component references
     /// </summary>
-    void FixedUpdate()
+    void Awake()
     {
-        if (isFleeing)
+        // Set layer recursively for raycast detection
+        // Layer 10 is "Target" layer used by Weapon.RaycastShot()
+        Helpers.RecursiveLayerChange(transform, LayerMask.NameToLayer("Target"));
+        
+        // NAVMESH ADDITION: Cache TargetAI reference
+        // Uses GetComponentInParent because TargetAI may be on parent GameObject
+        // (Target component is often on a child mesh object)
+        targetAI = GetComponentInParent<TargetAI>();
+        
+        if (targetAI != null)
         {
-            // Calculate new position
-            Vector3 movement = fleeDirection * fleeSpeed * Time.fixedDeltaTime;
-            Vector3 newPosition = m_Rigidbody.position + movement;
-            
-            // Apply movement through physics system
-            m_Rigidbody.MovePosition(newPosition);
-            
-            // Update timer
-            fleeTimer -= Time.fixedDeltaTime;
-            
-            // Check if flee duration expired
-            if (fleeTimer <= 0)
-            {
-                StopFleeing();
-            }
-        }
-        else if (returnToOrigin)
-        {
-            // Optional: Slowly return to original position
-            ReturnToOriginalPosition();
+            Debug.Log($"Target {gameObject.name}: AI component found, flee behavior enabled");
         }
     }
     
-    // ====================================================================
-    // FLEE BEHAVIOR - FIXED VERSION
-    // ====================================================================
-    
     /// <summary>
-    /// Start fleeing away from threat
-    /// FIXED: Correct direction calculation (away from player)
-    /// </summary>
-    public void StartFleeing()
-    {
-        if (isFleeing) return; // Already fleeing
-        
-        // Get player reference
-        Transform player = Controller.Instance?.transform;
-        if (player == null)
-        {
-            Debug.LogWarning("Cannot flee - no player reference!");
-            return;
-        }
-        
-        // FIXED: Calculate direction AWAY from player
-        // Direction = target position - player position (points away from player)
-        Vector3 awayFromPlayer = transform.position - player.position;
-        
-        // Constrain to horizontal plane if configured
-        if (constrainToHorizontal)
-        {
-            awayFromPlayer.y = 0;
-        }
-        
-        // Normalize to get unit direction vector
-        fleeDirection = awayFromPlayer.normalized;
-        
-        // Set flee state
-        isFleeing = true;
-        fleeTimer = fleeDuration;
-        
-        Debug.Log($"{gameObject.name} fleeing away from player! Direction: {fleeDirection}");
-        
-        // Optional: Add flee start effects
-        OnFleeStart();
-    }
-    
-    /// <summary>
-    /// Stop fleeing behavior
-    /// </summary>
-    public void StopFleeing()
-    {
-        if (!isFleeing) return;
-        
-        isFleeing = false;
-        fleeTimer = 0f;
-        
-        Debug.Log($"{gameObject.name} stopped fleeing");
-        
-        // Optional: Add flee end effects
-        OnFleeEnd();
-    }
-    
-    /// <summary>
-    /// Return to original position after fleeing
-    /// </summary>
-    void ReturnToOriginalPosition()
-    {
-        float distanceToOrigin = Vector3.Distance(transform.position, originalPosition);
-        
-        if (distanceToOrigin > 0.1f)
-        {
-            // Move back slowly
-            Vector3 returnDirection = (originalPosition - transform.position).normalized;
-            Vector3 movement = returnDirection * (fleeSpeed * 0.5f) * Time.fixedDeltaTime;
-            Vector3 newPosition = m_Rigidbody.position + movement;
-            
-            m_Rigidbody.MovePosition(newPosition);
-        }
-    }
-    
-    // ====================================================================
-    // INTEGRATION WITH TARGET SYSTEM
-    // ====================================================================
-    
-    /// <summary>
-    /// Automatic integration with Target damage system
+    /// Called when object becomes active
+    /// Resets health for respawning/pooling scenarios
     /// </summary>
     void OnEnable()
     {
-        // This could be called by Target.Got() instead
-        // For automatic integration, you'd modify Target.cs to call this
+        m_CurrentHealth = health;
+        m_Destroyed = false;
     }
     
-    // ====================================================================
-    // VISUAL FEEDBACK
-    // ====================================================================
+    // ========================================================================
+    // DAMAGE HANDLING
+    // ========================================================================
     
     /// <summary>
-    /// Called when flee starts - add effects here
+    /// Called by Weapon.RaycastShot() when this target is hit
+    /// Reduces health and triggers appropriate response
+    /// 
+    /// NAVMESH MODIFICATION: Added flee trigger for wounded targets
     /// </summary>
-    void OnFleeStart()
+    /// <param name="damage">Amount of damage to apply</param>
+    public void Got(float damage)
     {
-        // Could add:
-        // - Particle effect (dust cloud, speed lines)
-        // - Sound effect (panic sound, footsteps)
-        // - Animation trigger (run animation)
-        // - Color change (flash red)
-    }
-    
-    /// <summary>
-    /// Called when flee ends - add effects here
-    /// </summary>
-    void OnFleeEnd()
-    {
-        // Could add:
-        // - Return to idle animation
-        // - Play recovery sound
-        // - Reset color
-    }
-    
-    // ====================================================================
-    // DEBUG VISUALIZATION
-    // ====================================================================
-    
-    void OnDrawGizmosSelected()
-    {
-        // Draw flee distance radius
-        Gizmos.color = Color.red;
-        Gizmos.DrawWireSphere(transform.position, fleeDistance);
+        // Apply damage
+        m_CurrentHealth -= damage;
         
-        // Draw flee direction when fleeing
-        if (isFleeing && Application.isPlaying)
-        {
-            Gizmos.color = Color.yellow;
-            Gizmos.DrawRay(transform.position, fleeDirection * fleeDistance);
-        }
+        // Play hit sound effect
+        if (HitPlayer != null)
+            HitPlayer.PlayRandom();
         
-        // Draw original position
-        if (returnToOrigin)
+        // ================================================================
+        // SURVIVAL CHECK - Target wounded but not destroyed
+        // ================================================================
+        if (m_CurrentHealth > 0)
         {
-            Gizmos.color = Color.green;
-            Gizmos.DrawWireCube(originalPosition, Vector3.one * 0.5f);
-            Gizmos.DrawLine(transform.position, originalPosition);
-        }
-    }
-}
-
-// ============================================================================
-// KEY FIXES APPLIED:
-// 1. Correct flee direction: (target - player) points AWAY from player
-// 2. Uses Rigidbody.MovePosition() in FixedUpdate() for physics compliance
-// 3. Rigidbody set to kinematic to prevent physics interference
-// 4. All movement through physics system, not transform manipulation
-// ============================================================================
-```
-
-### 5.3 Implementation C: Event-Driven Flee System
-
-For complex multi-behavior scenarios:
-
-```csharp
-// Location: Create new file at Assets/Creator Kit - FPS/Scripts/AI/FleeEventSystem.cs
-// Purpose: Event-based fleeing that any component can trigger
-
-using UnityEngine;
-using UnityEngine.Events;
-
-/// <summary>
-/// Event-driven flee system for modular behavior
-/// Other components can trigger flee through events
-/// 
-/// STUDENT LEARNING:
-/// - UnityEvents for decoupled communication
-/// - Component modularity
-/// - State machine alternatives
-/// </summary>
-public class FleeEventSystem : MonoBehaviour
-{
-    [Header("Flee Events")]
-    public UnityEvent onFleeStart;
-    public UnityEvent onFleeEnd;
-    public UnityEvent<float> onFleeProgress; // Progress 0-1
-    
-    [Header("Configuration")]
-    public float fleeDuration = 3f;
-    public float fleeSpeed = 7f;
-    public bool autoTriggerOnDamage = true;
-    
-    private bool isFleeing = false;
-    private float fleeProgress = 0f;
-    
-    void Start()
-    {
-        if (autoTriggerOnDamage)
-        {
-            // Auto-subscribe to Target damage event
-            Target target = GetComponent<Target>();
-            if (target != null)
+            // NAVMESH ADDITION: Trigger flee behavior
+            if (targetAI != null)
             {
-                // Would need to modify Target to have damage event
+                Debug.Log($"{gameObject.name} wounded ({m_CurrentHealth}/{health} HP) - fleeing!");
+                targetAI.StartFleeing();
             }
-        }
-    }
-    
-    public void TriggerFlee()
-    {
-        if (!isFleeing)
-        {
-            isFleeing = true;
-            fleeProgress = 0f;
-            onFleeStart?.Invoke();
-            StartCoroutine(FleeCoroutine());
-        }
-    }
-    
-    System.Collections.IEnumerator FleeCoroutine()
-    {
-        float elapsed = 0f;
-        
-        while (elapsed < fleeDuration)
-        {
-            elapsed += Time.deltaTime;
-            fleeProgress = elapsed / fleeDuration;
-            onFleeProgress?.Invoke(fleeProgress);
-            yield return null;
+            
+            return; // Don't destroy - target survives
         }
         
-        isFleeing = false;
-        onFleeEnd?.Invoke();
+        // ================================================================
+        // DESTRUCTION - Target health depleted
+        // ================================================================
+        
+        // Mark as destroyed
+        m_Destroyed = true;
+        
+        // NAVMESH ADDITION: Stop AI movement before destruction
+        // Prevents NavMeshAgent errors from operating on inactive GameObject
+        if (targetAI != null)
+        {
+            targetAI.StopMovement();
+        }
+        
+        // Enable death effects (broken version, particles, etc.)
+        foreach (var go in EnableOnDeath)
+        {
+            go.SetActive(true);
+            go.transform.SetParent(null); // Detach so it persists
+        }
+        
+        // Notify game system for scoring
+        GameSystem.Instance.TargetDestroyed(pointValue);
+        
+        // Deactivate this target
+        gameObject.SetActive(false);
     }
 }
 ```
 
-### Integration Summary
+#### 5.3.2 Changes Summary
 
-1. **For NavMesh enemies**: Use the built-in flee state in `TargetAI.cs`
-2. **For physics enemies**: Use the fixed `SimpleTargetFlee.cs` with proper Rigidbody movement
-3. **For complex behaviors**: Use `FleeEventSystem.cs` with UnityEvents
+| Line/Section | Change | Purpose |
+|--------------|--------|---------|
+| Field declaration | Added `private TargetAI targetAI;` | Store AI reference |
+| Awake() | Added `GetComponentInParent<TargetAI>()` | Cache reference once |
+| Got() - survival branch | Added `targetAI.StartFleeing()` call | Trigger flee on wound |
+| Got() - destruction branch | Added `targetAI.StopMovement()` call | Clean shutdown |
 
-All three approaches now:
+#### 5.3.3 Why GetComponentInParent?
 
-- Calculate flee direction correctly (away from player)
-- Use physics-compliant movement methods
-- Integrate cleanly with the existing Target damage system
+The Target component and TargetAI component may not be on the same GameObject:
 
-```csharp
-// Location: Create new file at Assets/Creator Kit - FPS/Scripts/System/SimpleTargetFlee.cs
-// Purpose: Basic fleeing behavior without NavMesh (for students not using NavMesh)
-// Learning Point: Vector math and direction calculation
-
-using UnityEngine;
-
-/// <summary>
-/// Simple fleeing behavior using Transform movement (no NavMesh required)
-/// Demonstrates vector mathematics for direction calculation
-///
-/// LEARNING OBJECTIVES:
-/// - Vector subtraction for direction
-/// - Vector normalization
-/// - Time-based movement
-/// - State management with timers
-///
-/// Reference: Unity-3d-Math-Explained.md
-/// "Vector3 direction calculation, Time.deltaTime for frame-rate independence"
-/// </summary>
-public class SimpleTargetFlee : MonoBehaviour
-{
-    // ====================================================================
-    // PUBLIC SETTINGS
-    // ====================================================================
-
-    [Header("Flee Settings")]
-    [Tooltip("Speed when fleeing (units per second)")]
-    [Range(3f, 10f)]
-    public float fleeSpeed = 6f;
-
-    [Tooltip("How long to flee (seconds)")]
-    [Range(1f, 5f)]
-    public float fleeDuration = 3f;
-
-    [Tooltip("Should target return to patrol after fleeing?")]
-    public bool returnToPatrol = true;
-
-    // ====================================================================
-    // PRIVATE STATE
-    // ====================================================================
-
-    /// <summary>Is target currently fleeing?</summary>
-    private bool isFleeing = false;
-
-    /// <summary>Time remaining in flee state</summary>
-    private float fleeTimer = 0f;
-
-    /// <summary>Direction to flee (away from player)</summary>
-    private Vector3 fleeDirection;
-
-    /// <summary>Original position (for returning)</summary>
-    private Vector3 originalPosition;
-
-    // ====================================================================
-    // INITIALIZATION
-    // ====================================================================
-
-    void Start()
-    {
-        // Store original position
-        originalPosition = transform.position;
-    }
-
-    // ====================================================================
-    // UPDATE - FLEE MOVEMENT
-    // ====================================================================
-
-    /// <summary>
-    /// Called every frame
-    /// Moves target in flee direction while timer is active
-    /// </summary>
-    void Update()
-    {
-        if (isFleeing)
-        {
-            // Move in flee direction
-            // Movement formula: position += direction * speed * deltaTime
-            // deltaTime makes movement frame-rate independent
-            transform.position += fleeDirection * fleeSpeed * Time.deltaTime;
-
-            // Decrement timer
-            fleeTimer -= Time.deltaTime;
-
-            // Check if flee duration expired
-            if (fleeTimer <= 0)
-            {
-                isFleeing = false;
-
-                // Optional: Return to original position
-                if (returnToPatrol)
-                {
-                    // This is a simple implementation
-                    // Real implementation would resume patrol route
-                    Debug.Log($"{gameObject.name} finished fleeing");
-                }
-            }
-        }
-    }
-
-    // ====================================================================
-    // PUBLIC METHODS
-    // ====================================================================
-
-    /// <summary>
-    /// Starts fleeing behavior
-    /// Called by Target.Got() when wounded
-    ///
-    /// VECTOR MATHEMATICS:
-    /// 1. Calculate vector from player to target (toPlayer)
-    /// 2. Negate it to get opposite direction (fleeDirection)
-    /// 3. Normalize to unit vector (length = 1)
-    /// 4. Scale by speed for movement
-    ///
-    /// Reference: Unity-3d-Math-Explained.md
-    /// "Vector subtraction gives direction from B to A"
-    /// </summary>
-    public void StartFleeing()
-    {
-        // Get player reference
-        if (Controller.Instance == null)
-        {
-            Debug.LogWarning($"{gameObject.name}: Cannot flee - no player reference");
-            return;
-        }
-
-        // Calculate direction from player to target
-        // Vector subtraction: (target - player) = direction from player to target
-        Vector3 toPlayer = transform.position - Controller.Instance.transform.position;
-
-        // Negate to get direction away from player
-        fleeDirection = -toPlayer.normalized;
-
-        // Keep movement on horizontal plane (no flying away)
-        fleeDirection.y = 0;
-
-        // Re-normalize after Y removal
-        fleeDirection.Normalize();
-
-        // Start fleeing
-        isFleeing = true;
-        fleeTimer = fleeDuration;
-
-        Debug.Log($"{gameObject.name} fleeing away from player!");
-    }
-
-    /// <summary>
-    /// Stops fleeing behavior immediately
-    /// </summary>
-    public void StopFleeing()
-    {
-        isFleeing = false;
-        fleeTimer = 0f;
-    }
-
-    // ====================================================================
-    // DEBUG VISUALIZATION
-    // ====================================================================
-
-    void OnDrawGizmosSelected()
-    {
-        if (isFleeing)
-        {
-            // Draw flee direction
-            Gizmos.color = Color.red;
-            Gizmos.DrawRay(transform.position, fleeDirection * 5f);
-        }
-    }
-}
 ```
+Target_Prefab (root)          ← TargetAI + NavMeshAgent here
+├── Model                     
+│   └── TargetMesh            ← Target component + Collider here
+└── Effects
+```
+
+Raycasts hit the collider (on TargetMesh), so `Target.Got()` runs on that child object. `GetComponentInParent<TargetAI>()` searches upward to find TargetAI on the root.
+
+### 5.4 Flee Behavior Configuration
+
+These fields in TargetAI control flee behavior (configured in Inspector on prefab):
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `fleeDistance` | 20f | How far (in units) to flee from player |
+| `fleeSpeed` | 7f | Movement speed while fleeing |
+| `fleeDuration` | 3f | Seconds to remain in flee state |
+
+**Tuning suggestions:**
+
+- **Fast, short flee**: `fleeDistance=10, fleeSpeed=8, fleeDuration=2` — Quick dodge, aggressive enemies
+- **Long, cautious flee**: `fleeDistance=30, fleeSpeed=5, fleeDuration=5` — Cowardly enemies, gives player time to chase
+- **Room-scale flee**: Match `fleeDistance` to typical room size so enemies don't flee into walls
 
 ---
 
 ## 6. Integration & Testing Guide
 
-### 6.1 Setup Checklist
+### 6.1 Implementation Checklist
+
+This checklist assumes you are completing all phases before testing. Check items as you complete them.
 
 #### Phase 1: NavMesh Foundation
 
-- [ ] Install AI Navigation Package (com.unity.ai.navigation)
-- [ ] Add LevelRoomNavMesh.cs to project
-- [ ] Add LevelRoomNavMesh component to each room prefab
-- [ ] Modify LevelLayout.cs with BakeCompleteNavMesh()
-- [ ] Select LevelLayout GameObject in scene
-- [ ] Click "Bake All Room NavMeshes" button
-- [ ] Verify blue NavMesh overlay appears on floors
+- [ ] AI Navigation Package installed (`com.unity.ai.navigation`)
+- [ ] `LevelRoomNavMesh.cs` deployed to `/Scripts/AI/`
+- [ ] `NavMeshRoomConnector.cs` deployed to `/Scripts/AI/`
+- [ ] `LevelLayout.cs` modified with `BakeCompleteNavMesh()`
+- [ ] NavMesh baked successfully (blue overlay visible in Scene view)
 
 #### Phase 2: TargetAI Component
 
-- [ ] Create TargetAI.cs script
-- [ ] Add to Target prefab:
-  - [ ] NavMeshAgent component
-  - [ ] TargetAI component
-- [ ] Configure NavMeshAgent in prefab:
+- [ ] `TargetAI.cs` deployed to `/Scripts/AI/`
+- [ ] Target prefab has NavMeshAgent component added
+- [ ] Target prefab has TargetAI component added
+- [ ] NavMeshAgent settings configured:
   - [ ] Speed: 3.5
   - [ ] Angular Speed: 120
   - [ ] Acceleration: 8
   - [ ] Stopping Distance: 0.5
-- [ ] Create patrol route GameObject with waypoint children
-- [ ] Assign patrol route to TargetAI in Inspector
+  - [ ] Auto Braking: enabled
 
 #### Phase 3: Waypoint System
 
-- [ ] Create NavDestination.cs script
-- [ ] Create NavDestination prefab (empty GameObject with component)
-- [ ] Place 4-6 waypoints in each room type
-- [ ] Parent waypoints under "PatrolRoute" GameObject
-- [ ] Modify LevelRoom.cs to reference waypoints
+- [ ] `NavDestination.cs` deployed to `/Scripts/System/`
+- [ ] `LevelRoom.cs` modified with waypoint support
+- [ ] At least one patrol route GameObject created with waypoint children
 
 #### Phase 4: Spawner Integration
 
-- [ ] Backup original TargetSpawner.cs
-- [ ] Replace with new NavMesh version
-- [ ] Update TargetSpawner references in scene:
-  - [ ] Assign target prefabs (with TargetAI)
-  - [ ] Assign patrol routes
-  - [ ] Set spawn counts and timings
-- [ ] Test spawning
+- [ ] `TargetSpawner.cs` replaced with NavMesh version
+- [ ] Old PathSystem configurations acknowledged as orphaned
+- [ ] At least one SpawnEvent configured with:
+  - [ ] Target prefab (with TargetAI)
+  - [ ] Patrol route assigned
 
 #### Phase 5: Room Connectivity
 
-- [ ] Create NavMeshRoomConnector.cs
-- [ ] Add to LevelLayout GameObject
-- [ ] Configure settings:
+- [ ] NavMeshRoomConnector component added to LevelLayout GameObject
+- [ ] Settings configured:
   - [ ] Link Width: 2.0
-  - [ ] Auto Connect: true
-  - [ ] Debug Mode: true
-- [ ] Play scene and verify links created in console
+  - [ ] Auto Connect On Start: true
+  - [ ] Debug Mode: true (for initial testing)
+- [ ] Play mode tested—console shows link creation messages
 
 #### Phase 6: Fleeing Behavior
 
-- [ ] Modify Target.cs with fleeing hook
-- [ ] Verify TargetAI has StartFleeing() method
-- [ ] Set canFlee = true in Target Inspector
-- [ ] Test: Shoot target without killing it
-- [ ] Verify target flees away from player
+- [ ] `Target.cs` modified with TargetAI integration
+- [ ] Target prefab uses modified Target.cs
+- [ ] Flee behavior tested (shoot target without killing)
 
 ### 6.2 Testing Procedures
 
-#### Test 1: Basic Navigation
+Complete these tests in order. Each builds on the previous.
 
-1. Place Target with TargetAI in scene
-2. Assign patrol route with 4 waypoints
-3. Press Play
-4. **Expected**: Target walks between waypoints in loop
+#### Test 1: NavMesh Verification
 
-#### Test 2: Player Detection
+**Goal**: Confirm NavMesh is baked and visible.
 
-1. Setup from Test 1
-2. Move player close to target (within 15 units)
-3. **Expected**: Target stops patrol and chases player
-4. Move player far away (>25 units)
-5. **Expected**: Target returns to patrol
+1. Open scene with LevelLayout
+2. Select a room GameObject
+3. Open Navigation window: `Window > AI > Navigation`
+4. Verify blue NavMesh overlay on walkable surfaces
+5. If no NavMesh visible:
+   - Select LevelLayout GameObject
+   - Click "Bake All Room NavMeshes" button (custom inspector)
+   - Or manually add NavMeshSurface to each room and bake
 
-#### Test 3: Fleeing Behavior
+**Pass criteria**: Blue NavMesh overlay visible on all floors
 
-1. Setup from Test 2
-2. Shoot target once (don't kill)
-3. **Expected**: Target flees away from player for 5 seconds
-4. After 5 seconds: Target returns to patrol
+#### Test 2: Basic Patrol Navigation
 
-#### Test 4: Multi-Room Navigation
+**Goal**: Confirm TargetAI can navigate waypoints.
 
-1. Create level with 2 connected rooms
-2. Place patrol routes spanning both rooms
-3. Assign target with multi-room patrol
-4. **Expected**: Target walks through doorway between rooms
+1. Place a Target prefab (with TargetAI + NavMeshAgent) directly in scene
+2. Create patrol route:
+   - Create empty GameObject "TestPatrolRoute"
+   - Add 4 child empty GameObjects as waypoints
+   - Position waypoints in a square pattern within one room
+3. Select the Target and assign patrol route to TargetAI.patrolRoute
+4. Enter Play Mode
+5. Observe target movement
 
-#### Test 5: Complete Gameplay Loop
+**Pass criteria**: Target walks to each waypoint in sequence, then loops
 
-1. Full level with multiple targets
-2. Targets patrol, detect, chase, and flee
-3. **Expected**: All behaviors work together seamlessly
+**Common failures**:
+- Target doesn't move → Check NavMeshAgent is enabled, patrol route is assigned
+- Target slides/vibrates → NavMesh not baked under target's position
+- Target walks through walls → NavMesh incorrectly baked on walls
 
-### 6.3 Common Issues & Solutions
+#### Test 3: Player Detection and Chase
 
-#### Issue: NavMesh Not Visible
+**Goal**: Confirm TargetAI detects and chases player.
 
-**Symptom**: No blue overlay on floors  
-**Solution**:
+1. Setup from Test 2 (patrolling target)
+2. Enter Play Mode
+3. Walk player toward target (within 15 units default detection radius)
+4. Observe target behavior
 
-- Ensure NavMeshSurface component has "collectObjects = Children"
-- Check that floor GameObjects have MeshRenderer
-- Verify "Bake All Room NavMeshes" was clicked
-- Check Console for baking errors
+**Pass criteria**: Target stops patrolling and moves toward player
 
-#### Issue: Target Doesn't Move
+5. Walk player far away (>25 units)
 
-**Symptom**: Target stands still, doesn't patrol  
-**Solution**:
+**Pass criteria**: Target returns to patrol after losing player
 
-- Verify NavMeshAgent component exists
-- Check agent is enabled (not disabled in Inspector)
-- Ensure patrol route is assigned in TargetAI
-- Verify waypoints are children of patrol route parent
-- Check Console for "No patrol locations" warning
+#### Test 4: Fleeing Behavior
 
-#### Issue: Target Stuck at Doorway
+**Goal**: Confirm damaged targets flee.
 
-**Symptom**: Target reaches doorway, stops, doesn't enter next room  
-**Solution**:
+1. Setup from Test 3 (target that can detect/chase)
+2. Configure target to survive multiple hits:
+   - Select Target prefab
+   - Set `health` to 10 or higher
+   - Set weapon damage lower than health (or use weak weapon)
+3. Enter Play Mode
+4. Shoot target once (wound but don't kill)
+5. Observe target behavior
 
-- Verify NavMeshLinks exist at doorways (check hierarchy)
-- Increase NavMeshAgent radius (try 0.3 instead of 0.5)
-- Widen doorways in level geometry
-- Check doorways have clear NavMesh (no obstacles)
+**Pass criteria**: 
+- Console shows "[name] wounded... fleeing!"
+- Target moves away from player
+- After ~3 seconds, target returns to patrol
 
-#### Issue: Target Doesn't Detect Player
+**Common failures**:
+- Target dies instead of fleeing → Increase target health or reduce weapon damage
+- Target doesn't flee → Check Target.cs has TargetAI integration, check TargetAI reference isn't null
+- Target flees toward player → Vector math error—verify `transform.position - _player.position` (not reversed)
 
-**Symptom**: Player walks past target, no chase  
-**Solution**:
+#### Test 5: Multi-Room Navigation
 
-- Verify Controller.Instance is not null (check Console)
-- Increase detectionRange in TargetAI Inspector
-- Ensure \_playerTransform is assigned (check Start() code)
-- Check playerCheckInterval isn't too long
+**Goal**: Confirm NavMeshLinks enable room-to-room traversal.
 
-#### Issue: Fleeing Doesn't Work
+1. Create patrol route spanning two connected rooms:
+   - Waypoints 0-1 in Room A
+   - Waypoints 2-3 in Room B
+2. Position target in Room A
+3. Assign multi-room patrol route
+4. Enter Play Mode
+5. Observe target crossing between rooms
 
-**Symptom**: Target takes damage, doesn't flee  
-**Solution**:
+**Pass criteria**: Target navigates through doorway to reach waypoints in other room
 
-- Verify canFlee = true in Target Inspector
-- Check TargetAI component exists on same GameObject
-- Ensure health > 0 after damage (not one-shot kill)
-- Look for "wounded!" debug message in Console
-- Verify StartFleeing() method exists in TargetAI
+**Common failures**:
+- Target stops at doorway → NavMeshLink not created; check NavMeshRoomConnector console output
+- Target teleports between rooms → NavMeshLink startPoint/endPoint misconfigured
+- "No path found" warning → Rooms not connected; verify room exits are properly aligned
 
-#### Issue: Performance Problems
+#### Test 6: Spawner Integration
 
-**Symptom**: Low framerate with many targets  
-**Solution**:
+**Goal**: Confirm TargetSpawner creates functional AI targets.
 
-- Reduce playerCheckInterval (0.5 â†’ 1.0 seconds)
-- Lower number of spawned targets
-- Use object pooling for targets (advanced)
-- Reduce NavMesh precision (increase voxel size)
+1. Create or select TargetSpawner GameObject
+2. Configure SpawnEvent:
+   - Target To Spawn: AI-enabled prefab
+   - Count: 3
+   - Time Between Spawn: 2.0
+   - Patrol Route: valid patrol route object
+3. Enter Play Mode
+4. Wait for spawns
+
+**Pass criteria**:
+- Console shows spawn messages
+- Targets appear at spawner location
+- Each target begins patrolling assigned route
+
+#### Test 7: Complete Gameplay Loop
+
+**Goal**: Validate full system integration.
+
+1. Configure scene with:
+   - Multiple spawners
+   - Multiple patrol routes (some single-room, some multi-room)
+   - Multiple target types (different health values)
+2. Enter Play Mode
+3. Play through scenario:
+   - Let targets spawn and patrol
+   - Approach to trigger chase
+   - Shoot to wound (trigger flee)
+   - Kill targets (verify destruction and scoring)
+   - Move between rooms (verify multi-room behavior)
+
+**Pass criteria**: All behaviors work together without errors or unexpected interactions
 
 ---
 
-## 7. Learning Outcomes & Book References
+## 7. ExampleScene Migration Guide
 
-### 7.1 Chapter 9 Mapping
+This section provides step-by-step instructions for converting the existing ExampleScene to use the NavMesh-based AI system. 
 
-| Ferrone Section              | Pages   | Implementation                                  | Learning Outcome                      |
-| ---------------------------- | ------- | ----------------------------------------------- | ------------------------------------- |
-| Navigating 3D Space          | 266     | NavMesh system                                  | Understanding navigation fundamentals |
-| Navigation Components        | 266-267 | NavMeshSurface, Agent, Obstacle                 | Component roles and relationships     |
-| AI Navigation Package        | 267-268 | Package installation                            | Unity package system                  |
-| Setting Up NavMeshSurface    | 268-270 | LevelRoomNavMesh.cs                             | Baking navigation data                |
-| Setting Up Enemy Agents      | 271-273 | TargetAI component setup                        | NavMeshAgent configuration            |
-| Procedural Programming       | 274     | Patrol initialization                           | Iterating collections                 |
-| Referencing Patrol Locations | 274-277 | InitializePatrolRoute()                         | Procedural waypoint collection        |
-| Moving Enemy Agents          | 278-279 | MoveToNextPatrolLocation()                      | Setting agent destinations            |
-| Update Loop Logic            | 280-282 | Update() state machine                          | Frame-by-frame AI updates             |
-| Seek and Destroy             | 283-284 | CheckForPlayer()                                | Dynamic destination changes           |
-| Lowering Player Health       | 285-286 | (Not implemented - FPS Kit handles differently) | Collision detection concepts          |
-| Detecting Bullet Collisions  | 286-289 | Target.Got() callback                           | Event-driven programming              |
-| Refactoring & DRY            | 291-293 | Method extraction                               | Code quality principles               |
+**Prerequisites**: All code from Phases 1-6 must be deployed before starting this migration.
 
-### 7.2 Additional Learning Resources
+### 7.1 Understanding ExampleScene's Current State
 
-#### Vector Mathematics (Unity-3d-Math-Explained.md)
+Before modifying, understand what exists:
 
-- **Vector3.Distance()**: Player detection ranges
-- **Vector3.MoveTowards()**: Alternative movement approach
-- **Vector3 subtraction**: Flee direction calculation
-- **Vector3.normalized**: Unit direction vectors
+#### What ExampleScene Contains
 
-#### Unity Navigation Documentation
+| Element | Count | Current State |
+|---------|-------|---------------|
+| LevelLayout | 1 | Manages 11 room instances |
+| LevelRoom instances | 11 | Including "HeartRoom", corridors, etc. |
+| TargetSpawner objects | Multiple | Configured with OLD PathSystem data |
+| Target prefabs | 2+ types | Referenced by GUID in spawners |
+| PathSystem data | Per spawner | `path.localNodes` with waypoint coordinates |
 
-- **NavMeshSurface**: Baking walkable surfaces
-- **NavMeshAgent**: Autonomous navigation
-- **NavMeshLink**: Connecting disconnected surfaces
-- **NavMeshObstacle**: Dynamic obstacle avoidance
+#### What Will Happen After Migration
 
-### 7.3 Extension Exercises for Students
+| Element | Change |
+|---------|--------|
+| LevelLayout | Gets NavMeshRoomConnector component |
+| LevelRoom instances | Get baked NavMesh surfaces |
+| TargetSpawner objects | Reconfigured with patrol routes (old path data ignored) |
+| Target prefabs | Modified with TargetAI + NavMeshAgent |
+| PathSystem data | Orphaned (Unity ignores non-existent fields) |
 
-#### Beginner Extensions
+#### The Orphaned Data Problem
 
-1. **Variable Speed**: Make targets run faster when chasing
-2. **Health Display**: Add health bar above targets
-3. **Multiple Patrol Routes**: Targets switch routes randomly
-4. **Sound Effects**: Add footstep sounds to moving targets
+When Unity loads ExampleScene with the new TargetSpawner.cs:
 
-#### Intermediate Extensions
+```yaml
+# OLD serialized data in scene file:
+speed: 1
+path:
+  pathType: 1
+  localNodes:
+  - {x: 0, y: 0, z: 0}
+  - {x: -5.95, y: -0.14, z: 1.21}
+```
 
-1. **Line of Sight**: Target only detects player if visible
-2. **Alert System**: Detected target alerts nearby targets
-3. **Cover System**: Targets seek cover when wounded
-4. **Attack Patterns**: Different target types with varied behaviors
+These fields no longer exist in the script, so Unity silently ignores them. The spawner loads with:
+- `spawnEvents`: Empty array (needs configuration)
+- `patrolRoute`: Null (needs assignment)
 
-#### Advanced Extensions
+**This is not an error**—it's expected. You must reconfigure each spawner.
 
-1. **Dynamic Waypoints**: Procedurally generated patrol routes
-2. **Squad Behavior**: Groups of targets coordinate
-3. **Learning AI**: Targets remember player patterns
-4. **Navigation Optimization**: Performance profiling and improvement
+### 7.2 Pre-Migration Checklist
 
+Verify all code is deployed before starting:
+
+- [ ] `LevelRoomNavMesh.cs` exists in `/Scripts/AI/`
+- [ ] `NavMeshRoomConnector.cs` exists in `/Scripts/AI/`
+- [ ] `TargetAI.cs` exists in `/Scripts/AI/`
+- [ ] `NavDestination.cs` exists in `/Scripts/System/`
+- [ ] `TargetSpawner.cs` is the NEW version (check for `patrolRoute` field)
+- [ ] `Target.cs` has TargetAI integration (check for `GetComponentInParent<TargetAI>()`)
+- [ ] `LevelLayout.cs` has `BakeCompleteNavMesh()` method
+- [ ] `LevelRoom.cs` has waypoint support fields
+
+### 7.3 Step-by-Step Migration
+
+#### Step 1: Backup ExampleScene
+
+**Why**: Preserve the original in case you need to reference old configurations or revert.
+
+1. In Project window, navigate to `Assets/Creator Kit - FPS/Scenes/`
+2. Select `ExampleScene.unity`
+3. Press Ctrl+D (duplicate)
+4. Rename duplicate to `ExampleScene_Original_Backup.unity`
+5. Open the original `ExampleScene.unity` for modification
+
+#### Step 2: Bake NavMesh for All Rooms
+
+**Why**: AI navigation requires NavMesh surfaces. Without baking, NavMeshAgents cannot pathfind.
+
+1. Open ExampleScene
+2. In Hierarchy, find and select the `LevelLayout` GameObject
+3. In Inspector, look for the custom LevelLayout editor
+4. Click **"Bake All Room NavMeshes"** button
+   - If button doesn't appear, ensure LevelLayout.cs has the editor modification
+5. Wait for baking to complete (may take 10-30 seconds for 11 rooms)
+6. Verify baking succeeded:
+   - Select any room GameObject
+   - In Scene view, you should see blue NavMesh overlay on floors
+   - Check Console for any baking errors
+
+**Troubleshooting**:
+- No blue overlay → Room may lack floor geometry or geometry isn't marked Navigation Static
+- Baking errors → Check room prefabs have LevelRoomNavMesh component
+
+#### Step 3: Add NavMeshRoomConnector
+
+**Why**: Enables AI to navigate between rooms through doorways.
+
+1. Select `LevelLayout` GameObject in Hierarchy
+2. In Inspector, click **Add Component**
+3. Search for and add `NavMeshRoomConnector`
+4. Configure settings:
+   - **Link Width**: 2.0 (matches doorway width)
+   - **Auto Connect On Start**: ✓ enabled
+   - **Debug Mode**: ✓ enabled (for initial testing)
+5. Save the scene (Ctrl+S)
+
+**What this does**: At runtime, NavMeshRoomConnector scans all rooms, finds aligned exits, and creates NavMeshLink components connecting them.
+
+#### Step 4: Modify Target Prefabs
+
+**Why**: Targets need NavMeshAgent and TargetAI to use NavMesh navigation.
+
+1. In Project window, navigate to target prefabs:
+   - `Assets/Creator Kit - FPS/Prefabs/Targets/` (or similar location)
+2. For **each target prefab** used in ExampleScene:
+
+   a. Double-click prefab to open in Prefab Mode
+   
+   b. Select the **root GameObject** of the prefab
+   
+   c. Add **NavMeshAgent** component:
+      - Click Add Component → Navigation → NavMeshAgent
+      - Configure settings:
+        - Speed: 3.5
+        - Angular Speed: 120
+        - Acceleration: 8
+        - Stopping Distance: 0.5
+        - Auto Braking: ✓
+   
+   d. Add **TargetAI** component:
+      - Click Add Component → search "TargetAI"
+      - Configure settings:
+        - Detection Radius: 15
+        - Patrol Speed: 3.5
+        - Chase Speed: 6
+        - Flee Speed: 7
+        - Flee Distance: 20
+        - Flee Duration: 3
+        - (Leave Patrol Route empty—assigned by spawner)
+   
+   e. Verify Target component exists on child:
+      - Find the child with Target component
+      - Confirm it will find TargetAI via GetComponentInParent
+   
+   f. Save prefab (Ctrl+S) and exit Prefab Mode
+
+3. Repeat for all target prefab variants
+
+**Prefab hierarchy should look like**:
+
+```
+TargetPrefab (root)
+├── NavMeshAgent ← NEW
+├── TargetAI ← NEW  
+├── Model
+│   └── Mesh (with Target component + Collider)
+└── Effects
+```
+
+#### Step 5: Create Patrol Routes
+
+**Why**: TargetAI needs waypoints to patrol. You'll create patrol route GameObjects that spawners reference.
+
+**Strategy**: Create one patrol route per spawner, positioned appropriately for that spawner's location.
+
+1. In Hierarchy, create organizational parent:
+   - Right-click → Create Empty
+   - Name it `--- PATROL ROUTES ---` (dashes help visual separation)
+
+2. For each TargetSpawner in the scene, create a patrol route:
+
+   a. Find a TargetSpawner (search Hierarchy for "Spawner")
+   
+   b. Note its position and which room it's in
+   
+   c. Create patrol route:
+      - Right-click `--- PATROL ROUTES ---` → Create Empty
+      - Name it descriptively: `PatrolRoute_[RoomName]_[SpawnerNumber]`
+      - Example: `PatrolRoute_HeartRoom_01`
+   
+   d. Add waypoint children:
+      - Right-click the patrol route → Create Empty
+      - Name: `Waypoint_0`
+      - Position it at first patrol point (in Scene view, drag to location)
+      - Repeat for 3-5 more waypoints
+      - Position waypoints to create logical patrol path within the room
+   
+   e. **Important**: Keep waypoints within NavMesh areas (on floors, not in walls)
+
+3. For multi-room patrols (optional, for advanced testing):
+   - Create waypoints that span connected rooms
+   - NavMeshLinks will handle the doorway transitions
+
+**Tips for waypoint placement**:
+- Place waypoints where you want the AI to walk
+- Keep them slightly away from walls (0.5-1 unit margin)
+- Create natural patrol patterns (rectangles, figure-8s, room perimeters)
+- For interesting behavior, place waypoints near cover or corners
+
+#### Step 6: Reconfigure TargetSpawners
+
+**Why**: Spawners have orphaned PathSystem data and need new patrol route assignments.
+
+1. In Hierarchy, find each TargetSpawner GameObject
+   - Search for "Spawner" to find them all
+   - ExampleScene has multiple spawners
+
+2. For **each spawner**, configure in Inspector:
+
+   a. **Spawn Events** array:
+      - Set array size (e.g., 1 for single wave, 2+ for multiple waves)
+      - For each element:
+        - **Target To Spawn**: Drag the modified target prefab
+        - **Count**: Number to spawn (start with 1-2 for testing)
+        - **Time Between Spawn**: Delay in seconds (2.0 is reasonable)
+        - **Patrol Route**: Drag the corresponding patrol route GameObject
+   
+   b. **Spawn Radius**: 1.5 (reasonable default)
+   
+   c. **Show Spawn Gizmos**: ✓ (helps verify positioning)
+
+3. Verify configuration:
+   - With spawner selected, Scene view should show:
+     - Yellow sphere at spawn point
+     - Cyan lines to patrol waypoints (when selected)
+
+**Example configuration for one spawner**:
+
+```
+TargetSpawner (on "SpawnPoint_HeartRoom")
+├── Spawn Events: 1 element
+│   └── [0]
+│       ├── Target To Spawn: Target_Basic (prefab)
+│       ├── Count: 2
+│       ├── Time Between Spawn: 3.0
+│       └── Patrol Route: PatrolRoute_HeartRoom_01 (scene object)
+├── Spawn Radius: 1.5
+└── Show Spawn Gizmos: ✓
+```
+
+#### Step 7: Configure Target Health for Flee Testing
+
+**Why**: To test fleeing, targets need to survive at least one hit.
+
+1. Open each target prefab
+2. Find the child with Target component
+3. Set **Health** to a value higher than weapon damage:
+   - Default weapon damage is ~2-5
+   - Set health to 10-15 for flee testing
+   - Or set even higher to see multiple flee triggers
+
+4. Save prefabs
+
+**Note**: You can adjust this after testing. Higher health = more flee opportunities = more visible AI behavior during testing.
+
+#### Step 8: Save and Test
+
+1. Save the scene (Ctrl+S)
+2. Enter Play Mode
+3. Wait for spawns (based on your timeBetweenSpawn settings)
+4. Observe:
+   - Console should show spawn messages
+   - Console should show NavMeshLink creation (from NavMeshRoomConnector)
+   - Targets should appear and begin patrolling
+
+5. Test behaviors:
+   - Walk toward a target → Should trigger chase
+   - Walk away → Should return to patrol
+   - Shoot target (wound, don't kill) → Should flee
+   - Kill target → Should be destroyed, score updated
+
+### 7.4 Troubleshooting Migration Issues
+
+#### Issue: Targets Don't Move
+
+**Symptoms**: Targets spawn but stand still
+
+**Checks**:
+1. Is patrol route assigned in SpawnEvent? (Check TargetSpawner Inspector)
+2. Does patrol route have child waypoints? (Check patrol route in Hierarchy)
+3. Is NavMeshAgent component on prefab root?
+4. Is NavMesh baked? (Check for blue overlay)
+5. Is spawner position on NavMesh? (Target may spawn off-mesh)
+
+**Console clues**:
+- "No patrol route for AI target" → Patrol route not assigned
+- "SetDestination failed" → NavMesh issue
+
+#### Issue: Targets Fall Through Floor
+
+**Symptoms**: Targets spawn then fall or disappear
+
+**Cause**: Spawn position not on baked NavMesh
+
+**Fix**:
+1. Move spawner to a position with NavMesh coverage
+2. Increase spawner's Spawn Radius (tries to find valid NavMesh position)
+3. Re-bake NavMesh if floor is missing coverage
+
+#### Issue: Targets Can't Cross Rooms
+
+**Symptoms**: Targets patrol within room but stop at doorways
+
+**Checks**:
+1. Is NavMeshRoomConnector on LevelLayout?
+2. In Play Mode, check console for "Created NavMeshLink" messages
+3. Are rooms properly connected? (Exits aligned)
+
+**Debug**:
+1. Enable Debug Mode on NavMeshRoomConnector
+2. In Scene view (Play Mode), look for cyan link visualizations at doorways
+3. If no links visible, room exits may not be aligned properly
+
+#### Issue: Fleeing Doesn't Trigger
+
+**Symptoms**: Shooting target doesn't cause flee behavior
+
+**Checks**:
+1. Is target health high enough to survive the shot?
+2. Does Target.cs have the TargetAI integration? (Check for `targetAI` field)
+3. Is TargetAI component on the prefab?
+4. Check console for "wounded... fleeing!" message
+
+**Debug**:
+Add temporary debug line in Target.Got():
+```csharp
+Debug.Log($"Got() called. Health: {m_CurrentHealth}/{health}, TargetAI: {targetAI != null}");
+```
+
+#### Issue: Flee Goes Wrong Direction
+
+**Symptoms**: Target flees toward player instead of away
+
+**Cause**: Vector math error in TargetAI.StartFleeing()
+
+**Verify**: The flee direction calculation should be:
+```csharp
+Vector3 fleeDirection = transform.position - _player.position; // Correct
+// NOT: _player.position - transform.position (would go toward player)
+```
+
+#### Issue: Console Spam During Play
+
+**Symptoms**: Hundreds of debug messages
+
+**Fix**: After confirming system works:
+1. In NavMeshRoomConnector, uncheck Debug Mode
+2. In TargetSpawner, uncheck Show Spawn Gizmos
+3. Optionally, comment out verbose Debug.Log lines in TargetAI
+
+### 7.5 Post-Migration Cleanup
+
+Once everything works:
+
+1. **Disable debug modes**:
+   - NavMeshRoomConnector: Debug Mode = false
+   - TargetSpawner: Show Spawn Gizmos = false (or leave on if helpful)
+
+2. **Tune gameplay values**:
+   - Adjust target health for desired difficulty
+   - Adjust detection radius for desired awareness
+   - Adjust flee parameters for desired behavior
+
+3. **Add more patrol routes** for variety:
+   - Different patterns in different rooms
+   - Some simple (rectangle), some complex (multi-room)
+
+4. **Delete backup scene** (optional):
+   - Once satisfied, remove `ExampleScene_Original_Backup.unity`
+   - Or keep for reference
+
+5. **Document your changes**:
+   - Note which spawners use which patrol routes
+   - Record target prefab configurations
+   - Helps future modifications
+
+### 7.6 Migration Complete
+
+After completing this migration:
+
+- ExampleScene uses NavMesh-based AI navigation
+- Targets patrol dynamically instead of following rigid paths
+- Targets detect and chase the player
+- Wounded targets flee before resuming patrol
+- Targets can navigate between connected rooms
+- The old PathSystem is no longer used (data orphaned, system bypassed)
+
+**Next steps**:
+- Create additional scenes using the same patterns
+- Experiment with different patrol configurations
+- Adjust AI parameters for gameplay balance
+- Consider adding NavDestination components to waypoints for typed behavior
 ---
 
 ## 8. Troubleshooting & Common Pitfalls

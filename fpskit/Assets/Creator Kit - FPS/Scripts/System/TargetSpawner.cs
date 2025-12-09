@@ -239,6 +239,23 @@ public class TargetSpawner : MonoBehaviour
 
         // Optional: Spawn effects
         PlaySpawnEffects(spawnPosition);
+
+        // Initiate Patrol
+        if (element.aiComponent != null)
+        {
+            // Use assigned route, or auto-find if null
+            Transform routeToUse = element.patrolRoute;
+            if (routeToUse == null)
+            {
+                routeToUse = FindPatrolRouteInParentRoom();
+            }
+
+            if (routeToUse != null)
+            {
+                element.aiComponent.patrolRoute = routeToUse;
+                Debug.Log($"Assigned patrol route to {targetObj.name}");
+            }
+        }
     }
 
     /// <summary>
@@ -356,6 +373,29 @@ public class TargetSpawner : MonoBehaviour
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// Finds patrol route in the room containing this spawner
+    /// Called when SpawnEvent.patrolRoute is null
+    /// </summary>
+    private Transform FindPatrolRouteInParentRoom()
+    {
+        // Try to find LevelRoom in parent hierarchy
+        LevelRoom room = GetComponentInParent<LevelRoom>();
+        if (room != null)
+        {
+            // Look for PatrolRoute_Default child
+            Transform route = room.transform.Find("PatrolRoute_Default");
+            if (route != null && route.childCount > 0)
+            {
+                Debug.Log($"Auto-found patrol route in {room.name}");
+                return route;
+            }
+        }
+
+        Debug.LogWarning($"TargetSpawner {name}: No patrol route found in parent room");
+        return null;
     }
 }
 
